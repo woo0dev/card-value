@@ -7,11 +7,14 @@ export type SharedCapId = Brand<string, "SharedCapId">;
 export type ExclusiveGroupId = Brand<string, "ExclusiveGroupId">;
 
 /**
- * 전월실적 구간. 카드의 `performanceTiers`에 실적 오름차순으로 나열한다.
+ * 전월실적 구간. 전월실적에 따라 실제로 도달한 구간(`achievedTier`)을 결정한다.
  *
- * 구간의 높고 낮음은 배열 순서가 아니라 `minPreviousMonthSpend` 크기로 판정한다.
- * 전월실적이 `minPreviousMonthSpend` 이상이면 그 구간에 도달한 것이며,
- * `requiredTierId`처럼 구간을 참조하는 조건은 "해당 구간 이상"을 뜻한다.
+ * - 배열 순서는 구간 판정에 사용하지 않는다. 가독성을 위해 실적 오름차순으로 나열하는 것을 권하지만
+ *   계산은 이 순서에 의존하지 않는다.
+ * - 판정 기준은 `minPreviousMonthSpend`뿐이다. 전월실적이 `minPreviousMonthSpend` 이상인 구간 중
+ *   `minPreviousMonthSpend`가 가장 큰 구간이 `achievedTier`이며, 충족하는 구간이 없으면 `null`이다.
+ * - 구간의 높고 낮음은 항상 `minPreviousMonthSpend` 크기로 비교한다.
+ *   (`requiredTierId` 비교, 배타 그룹 승자 선택, `SharedCap.tierLimits` 선택 모두 동일)
  */
 export interface PerformanceTier {
   id: PerformanceTierId;
@@ -76,12 +79,22 @@ interface SpendingBenefitBase {
   id: BenefitId;
   name: string;
   /**
-   * 낮을수록 먼저 적용한다. 통합 한도 소진 순서와 배타 그룹의 승자를 결정한다.
+   * 낮을수록 먼저 적용한다. 실적 구간 선택에는 사용하지 않으며(구간은 `requiredTierId`가 결정),
+   * 다음 두 경우의 순서만 정한다.
+   * - 배타 그룹에서 `requiredTierId` 구간이 같은 후보끼리의 승자 (`exclusiveGroupId` 참고)
+   * - 여러 혜택이 같은 통합 한도(`sharedCapId`)를 소진하는 순서
+   *
    * 값이 같으면 `id` 오름차순(문자열 코드 유닛 순, 로케일 비의존)으로 먼저 적용한다.
    * 따라서 `priority`가 유일할 필요는 없고, 같은 입력은 항상 같은 결과를 만든다.
    */
   priority: number;
-  /** 필요한 최소 전월실적 구간. 조건이 없으면 `null`. */
+  /**
+   * 혜택이 eligible하기 위해 필요한 전월실적 구간.
+   * - `null`: 실적 구간 조건이 없다.
+   * - 값이 있으면 해당 구간 이상을 달성해야 eligible하다.
+   *   즉 `achievedTier`의 `minPreviousMonthSpend`가 이 구간의 `minPreviousMonthSpend` 이상이어야 한다.
+   *   (배열 순서가 아니라 `PerformanceTier.minPreviousMonthSpend`로 비교한다.)
+   */
   requiredTierId: PerformanceTierId | null;
   target: CategoryTarget;
   /** 대상 소비액 월 합계의 최소 조건. 없으면 `null`. */
@@ -89,8 +102,19 @@ interface SpendingBenefitBase {
   limits: BenefitLimits;
   sharedCapId: SharedCapId | null;
   /**
-   * 같은 그룹에서는 조건을 충족한 혜택 중 `priority`가 가장 낮은 하나만 적용한다.
+   * 같은 `exclusiveGroupId`의 혜택은 동시에 적용하지 않고 승자 하나만 적용한다.
    * 실적 구간별로 요율이 달라지는 혜택을 별도 혜택으로 나열할 때 사용한다.
+   *
+   * 승자 선택 순서:
+   * 1. eligible 조건을 모두 통과한 혜택만 후보로 한다.
+   * 2. `requiredTierId` 구간이 더 높은 혜택을 우선한다.
+   * 3. 같은 구간이면 `priority`가 낮은 혜택을 우선한다.
+   * 4. `priority`까지 같으면 `id` 오름차순을 tie-breaker로 사용한다.
+   *
+   * "더 높은 구간"은 숫자 값이나 배열 위치가 아니라 해당 구간의 `minPreviousMonthSpend`가
+   * 더 큰 것을 뜻한다. `requiredTierId: null`은 모든 구간보다 낮은 것으로 취급한다.
+   * 승자가 아닌 후보는 적용되지 않으며(통합 한도도 소진하지 않는다), 승자 선택은
+   * 통합 한도 적용보다 먼저 수행한다.
    */
   exclusiveGroupId: ExclusiveGroupId | null;
 }
