@@ -186,15 +186,51 @@ src/lib/recommendation/
 │   ├── spending.ts
 │   ├── calculation.ts
 │   ├── result.ts
+│   ├── validation.ts
 │   └── index.ts
 ├── eligibility.ts
 ├── rewards.ts
 ├── calculator.ts
 ├── ranking.ts
 ├── rounding.ts
+├── validation.ts
 └── index.ts
 ```
 
 - `eligibility`, `rewards`, `calculator`, `ranking`은 초기에는 단일 파일로 유지한다.
 - 파일의 복잡도가 실제로 증가할 때만 디렉터리로 분리한다.
 - `src/lib/recommendation/`은 Supabase나 React에 의존하지 않는 순수 모듈로 유지한다. DB 조회와 DB 행 → 도메인 모델 변환은 이 디렉터리 밖에서 처리한다.
+
+파일별 책임은 다음과 같이 구분한다.
+
+- `types/money.ts`: `Won`, `BasisPoints` 등 primitive branded type 정의만 담당한다.
+- `types/validation.ts`: 검증 결과 타입(`ValidationIssue`, `ValidationResult`, `ValidatedCard`)만 정의한다.
+- `validation.ts`: 런타임 값, 구조, 참조 무결성 검증을 담당한다. 계산은 하지 않는다.
+- `rounding.ts`: 실제 계산 중 반올림/버림을 담당한다. 입력 검증은 하지 않는다.
+
+## Validation Policy
+
+카드와 소비 입력 데이터는 `validation.ts`로 검증한다. 외부 데이터 → 도메인 변환 경계에서 검증하는 것을 기본으로 하며,
+검증을 통과한 카드만 `ValidatedCard`로 계산에 사용한다. `ValidatedCard`는 `validateCard()`의 성공 분기 한 곳에서만 만들고,
+다른 곳에서 `as ValidatedCard`를 사용하지 않는다.
+
+- 검증 결과는 throw하지 않고 구조화된 `ValidationIssue` 목록으로 반환한다. issue는 `code`, `severity`, `path`를 가진다.
+  `error`는 계산 불가(추천 대상 제외), `warning`은 계산 가능하지만 주의가 필요함을 뜻하며 `severity`는 code에 의해 결정된다.
+  `error`가 하나라도 있으면 `valid: false`이다.
+- 검증 code는 계산 trace의 reason code(`CalculationStep`, `NotAppliedReason`, `CalculationWarning`)와 별개로 관리한다.
+- 정상적으로 혜택이 적용되지 않는 것은 validation error가 아니다.
+- `Won`: 안전한 정수여야 한다. 소비액, 실적 하한, 혜택 금액, 한도, 연회비는 추가로 0 이상이어야 한다.
+  한도는 `null`(한도 없음) 또는 안전한 정수이며 `0`은 한도 0이다. 결과의 `netAnnualValue`는 음수 가능하며 검증 대상이 아니다.
+- `BasisPoints`: 안전한 정수이며 음수 불가, 0은 허용한다. `rateBps`는 상한을 두지 않고 `realizationBps`는 `0...10000`이다.
+- `MonthlySpending`: `previousMonth`와 `currentMonth`가 모두 있어야 한다. `{}`는 허용하고, 존재하지 않는 category key는 error다.
+  음수(환불) 소비는 지원하지 않는다.
+- `PerformanceTier`: 중복 `id`, 중복 `minPreviousMonthSpend`, 음수/비정수 threshold는 error다.
+  배열 순서, `minPreviousMonthSpend = 0`, tier가 없는 카드는 허용한다.
+- `priority`: 유한한 수이면 된다. 음수, 소수, 중복을 허용하며 최종 tie-breaker는 benefit `id` 오름차순이다.
+- 참조 무결성(error): `requiredTierId`(소비/부가 혜택), `SharedCap.tierLimits[].tierId` → `performanceTiers[].id`,
+  `sharedCapId` → `sharedCaps[].id`, `unverifiedConditions[].benefitId` → 실제 benefit id.
+  `SharedCap.id` 중복, 같은 `SharedCap` 안의 `tierId` 중복, 소비 혜택과 부가 혜택 전체에서의 benefit `id` 중복도 error다.
+- `exclusiveGroupId`: registry 없이 문자열 자체는 허용한다. 빈 문자열/공백은 error이고,
+  멤버가 하나뿐인 그룹과 같은 그룹, 같은 `requiredTierId`, 같은 `priority`인 후보가 여럿인 경우는 warning이다.
+- `PointValuation`: `wonPerThousandPoints`는 0보다 큰 안전한 정수, `programName`은 비어 있지 않아야 한다.
+  URL 형식, `verifiedAt` 형식, stale 판정, 프로그램별 valuation 일관성은 아직 검증하지 않는다.

@@ -5,7 +5,9 @@ export type Brand<T, B extends string> = T & { readonly [brand]: B };
 
 /**
  * 정수 KRW. 소수를 허용하지 않으며 음수는 순혜택처럼 유효한 결과에서만 나타난다.
- * 값 생성과 검증은 계산 엔진(`rounding.ts`)의 책임이다.
+ *
+ * 이 파일은 primitive branded type 정의만 담당한다.
+ * 런타임 값/구조/참조 검증은 `validation.ts`, 계산 중 반올림/버림은 `rounding.ts`의 책임이다.
  */
 export type Won = Brand<number, "Won">;
 
