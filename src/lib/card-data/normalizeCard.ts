@@ -201,11 +201,22 @@ function buildAnnualFee(card: RawCardRecord, extractedAt: string) {
     };
   }
 
+  // "값이 하나도 없음"과 "서로 다른 값이 충돌함"은 다른 상황이라 reason code를 분리한다.
+  if (distinct.size === 0) {
+    return {
+      status: "unverified" as const,
+      reasonCode: "NO_NUMERIC_VALUE_FOUND" as const,
+      provenance: provenance(
+        `annual_fee_domestic="${card.annualFeeDomestic ?? ""}", annual_fee_international="${card.annualFeeInternational ?? ""}" 모두 확인할 수 없음`,
+      ),
+    };
+  }
+
   return {
     status: "unverified" as const,
     reasonCode: "MULTIPLE_CONFLICTING_VALUES" as const,
     provenance: provenance(
-      `annual_fee_domestic="${card.annualFeeDomestic ?? ""}", annual_fee_international="${card.annualFeeInternational ?? ""}"가 서로 다르거나 확인할 수 없음`,
+      `annual_fee_domestic="${card.annualFeeDomestic ?? ""}", annual_fee_international="${card.annualFeeInternational ?? ""}"가 서로 다름`,
     ),
   };
 }
@@ -385,6 +396,60 @@ function detectTarget(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Piece 판정 (재사용 가능한 순수 함수)
+// ---------------------------------------------------------------------------
+
+function assertNeverPerkKind(value: never): never {
+  throw new Error(`Unexpected perkKind: ${JSON.stringify(value)}`);
+}
+
+/**
+ * piece를 구성하는 모든 필드의 outcome을 한 배열로 모은다. `kind`/`perkKind`에 따라
+ * 실제 필드 구성이 다르므로(스펜딩 혜택 vs 부가 혜택의 세 variant) 여기서 통일한다.
+ *
+ * 이 함수는 순수하며 `NormalizedCard`나 CSV를 전혀 모른다 — `NormalizedBenefitPiece` 하나만
+ * 보고 판정하므로, 이번 단계의 `normalizeCard.ts`뿐 아니라 다음 단계의 `toDomainCard()`도
+ * 그대로 재사용할 수 있다.
+ */
+export function getPieceFieldOutcomes(piece: NormalizedBenefitPiece): readonly NormalizationOutcome<unknown>[] {
+  if (piece.kind === "spendingBenefit") {
+    return [
+      piece.name,
+      piece.requiredTierId,
+      piece.target,
+      piece.minMonthlySpend,
+      piece.reward,
+      piece.limits,
+      piece.sharedCapId,
+    ];
+  }
+  switch (piece.perkKind) {
+    case "voucher":
+    case "gift":
+      return [piece.name, piece.requiredTierId, piece.value, piece.frequency];
+    case "lounge":
+      return [piece.name, piece.requiredTierId, piece.visitsPerYear, piece.valuePerVisit];
+    case "signupBonus":
+      return [piece.name, piece.requiredTierId, piece.value, piece.requirement];
+    default:
+      return assertNeverPerkKind(piece);
+  }
+}
+
+/** 모든 필드가 `parsed`일 때만 `true` — 다음 단계가 실제 Domain object를 만들 수 있는 조건. */
+export function isPieceFullyParsed(piece: NormalizedBenefitPiece): boolean {
+  return getPieceFieldOutcomes(piece).every((outcome) => outcome.status === "parsed");
+}
+
+/** piece의 필드 중 `unsupported`가 있으면 그중 먼저 발견된 code를, 없으면 `null`을 돌려준다. */
+export function findUnsupportedCode(piece: NormalizedBenefitPiece): UnsupportedConditionCode | null {
+  for (const outcome of getPieceFieldOutcomes(piece)) {
+    if (outcome.status === "unsupported") return outcome.code;
+  }
+  return null;
+}
+
 function processBenefitRow(
   card: RawCardRecord,
   raw: RawBenefitRecord,
@@ -541,7 +606,7 @@ function processBenefitRow(
         provenance: pieceProvenanceFor('"최소" 문구 없음 — 구간 조건 외 별도 최소 이용금액 없음'),
       };
 
-  const { outcome: target, unsupportedCode: targetUnsupportedCode } = detectTarget(
+  const { outcome: target } = detectTarget(
     raw.benefitCategory,
     lines,
     pieceProvenanceFor,
@@ -567,10 +632,9 @@ function processBenefitRow(
   const pieces: readonly NormalizedBenefitPiece[] = [piece];
 
   // 이 row가 뭔가 확실한 unsupported 조건을 담고 있었는지(카드 단위 경고에 참고용으로 남김).
-  const dominantUnsupportedCode: UnsupportedConditionCode | null =
-    targetUnsupportedCode ??
-    (reward.status === "unsupported" ? reward.code : null) ??
-    (limits.status === "unsupported" ? limits.code : null);
+  // `piece`의 모든 필드를 훑는 공용 판정 함수를 쓴다 — 특정 필드 몇 개만 손으로 나열하지
+  // 않으므로, 나중에 어떤 필드가 unsupported를 반환하게 되어도 여기서 빠지지 않는다.
+  const dominantUnsupportedCode = findUnsupportedCode(piece);
 
   return {
     benefit: { sourceBenefitOrder: benefitOrder, pieces },
