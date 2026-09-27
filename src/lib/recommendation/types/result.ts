@@ -8,6 +8,7 @@ import type {
   CalculationWarning,
   PerkCalculation,
 } from "./calculation";
+import type { NonEmptyReadonlyArray, ValidationErrorCode } from "./validation";
 
 /**
  * 카드 1장의 계산 결과. 순혜택이 음수여도 유효한 결과다.
@@ -40,6 +41,15 @@ export type ExclusionReason =
   | {
       code: "FILTERED_BY_USER_PREFERENCE";
       preference: "maxAnnualFee" | "issuer" | "cardType";
+    }
+  | {
+      code: "VALIDATION_FAILED";
+      /**
+       * `validateCard()` 실패 사유의 code만 옮긴다. `ValidationIssue`(`path`/`context` 포함)를
+       * 그대로 노출하지 않는다 — validation.ts의 내부 진단 구조가 recommendation 결과 계층에
+       * 강하게 결합되지 않도록 하기 위함이다.
+       */
+      errors: NonEmptyReadonlyArray<ValidationErrorCode>;
     };
 
 /** 추천 대상에서 제외된 카드와 그 사유. */
