@@ -813,13 +813,20 @@ function processBenefitRow(
   // 자체는 맞을 수 있지만 실제 월 혜택은 결제 건수에 의존하므로 원화 한도로 표현할 수
   // 없다는 이유는 그대로다.)
 
-  // "할인한도 없이"/"적립한도 없이": 원문이 스스로 한도가 없다고 명시한 경우다. 이건
-  // "한도를 확인할 수 없음"(unverified)이 아니라 "한도 자체가 없음"이라는 확정된 사실이며,
-  // `BenefitLimits.monthlyRewardCap`은 이미 `Won | null`이고 `null`이 "한도 없음"을 뜻하도록
-  // 정의돼 있다(types/benefit.ts). 그래서 숫자가 없다는 이유만으로 임의로 null을 만드는 게
-  // 아니라, 원문이 직접 "없다"고 말하는 이 두 표현만 대상으로 한다("한도 없이"만 있고
-  // "할인"/"적립" 중 어느 쪽 한도인지 원문에서 특정하지 않는 경우는 대상에서 제외한다).
-  const noRewardCapMatch = /할인한도\s*없이|적립한도\s*없이/.exec(fullBenefitText);
+  // "할인한도 없이"/"적립한도 없이"/"한도 없이": 원문이 스스로 한도가 없다고 명시한
+  // 경우다. 이건 "한도를 확인할 수 없음"(unverified)이 아니라 "한도 자체가 없음"이라는
+  // 확정된 사실이며, `BenefitLimits.monthlyRewardCap`은 이미 `Won | null`이고 `null`이
+  // "한도 없음"을 뜻하도록 정의돼 있다(types/benefit.ts). 그래서 숫자가 없다는 이유만으로
+  // 임의로 null을 만드는 게 아니라, 원문이 직접 "없다"고 말하는 이 표현들만 대상으로 한다.
+  // "한도\s*없이"를 세 번째 대안으로 추가했지만("할인"/"적립" 수식어 없이 "한도 없이"만
+  // 단독으로 쓰인 경우 — 실제 데이터에서 확인됨: cardAdId=10589/10590 "전월 이용금액에
+  // 관계없이, 한도 없이 서비스 제공"), 정규식 대안(|) 평가는 가장 왼쪽에서 매치되는
+  // 위치를 찾으므로 "할인한도 없이"/"적립한도 없이"처럼 수식어가 붙은 경우는 항상 그
+  // 대안이 먼저(더 이른 위치에서) 매치되어 기존 동작이 그대로 유지된다 — "한도 없이"만
+  // 새로 추가로 인식하는 것이지 기존 두 표현의 매치 결과를 바꾸지 않는다. "한도 금액"/
+  // "한도 내"/"한도 초과"/"한도 적용"/"한도 변경"처럼 "없이"가 뒤따르지 않는 문구는
+  // 이 정규식 자체가 매치하지 않는다.
+  const noRewardCapMatch = /할인한도\s*없이|적립한도\s*없이|한도\s*없이/.exec(fullBenefitText);
 
   let limits: NormalizationOutcome<{ monthlyRewardCap: Won | null; monthlyEligibleSpendCap: Won | null }>;
   let sharedCapId: NormalizationOutcome<string | null>;
