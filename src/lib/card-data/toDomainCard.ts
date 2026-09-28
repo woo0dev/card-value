@@ -7,12 +7,14 @@ import type {
   NormalizedSpendingBenefitPiece,
 } from "./normalizeTypes";
 import { findUnsupportedCode, isPieceFullyParsed } from "./normalizeCard";
+import { createExclusiveGroupId } from "./id";
 import type {
   BenefitId,
   Card,
   CardId,
   CardSource,
   CoreConditionField,
+  ExclusiveGroupId,
   PerformanceTier,
   PerformanceTierId,
   PerkBenefit,
@@ -37,12 +39,13 @@ import type {
  * 사유를 반환한다("failed"). 어떤 필드도 임의의 기본값(빈 문자열, 0, "credit" 등)으로
  * 채우지 않는다.
  *
- * `priority`/`exclusiveGroupId`는 원문에서 파싱되는 값이 아니라 배타 그룹을 실제로
- * 구성해야 결정되는 값이다(`normalizeCard.ts`의 `NormalizedSpendingBenefitPiece` 문서
- * 참고). 이번 단계는 그 그룹 구성 로직이 없으므로 모든 `SpendingBenefit`에 동일한
- * placeholder(`priority = 0`, `exclusiveGroupId = null`)를 쓴다 — 이건 "계산된 우선순위"가
- * 아니라 "아직 경쟁 관계를 모른다"는 뜻이며, 구간별 요율 분해/배타 그룹 로직이 생기면
- * 이 자리를 교체해야 한다.
+ * `priority`/`exclusiveGroupId`는 원문에서 파싱되는 값이 아니다. `priority`는 항상
+ * `0`이다(§`buildSpendingBenefit` 참고 — eligibility.ts의 배타 그룹 승자 결정은 tier
+ * rank를 먼저 비교하므로 이걸로 충분하다). `exclusiveGroupId`는 `NormalizedBenefit.pieces`
+ * 배열 길이로 결정한다 — 같은 raw row(`benefit.pieces`)에서 fully-parsed spendingBenefit
+ * piece가 2개 이상 나오면(구간별 분해, D) 그 piece들에 같은 `exclusiveGroupId`
+ * (`createExclusiveGroupId(cardAdId, sourceBenefitOrder)`)를 부여해 서로 배타 경쟁하게
+ * 하고, 1개뿐이면 지금까지와 동일하게 `null`이다.
  */
 
 // ---------------------------------------------------------------------------
@@ -110,6 +113,10 @@ function asPerformanceTierIdOrNull(value: string | null): PerformanceTierId | nu
   return value === null ? null : asPerformanceTierId(value);
 }
 
+function asExclusiveGroupId(value: string): ExclusiveGroupId {
+  return value as ExclusiveGroupId;
+}
+
 function assertNeverPerkKind(value: never): never {
   throw new Error(`toDomainCard: 예상하지 못한 perkKind: ${JSON.stringify(value)}`);
 }
@@ -142,7 +149,10 @@ function buildPerformanceTiers(tiers: readonly NormalizedPerformanceTier[]): rea
 // Piece → Benefit 변환 + unverifiedConditions 매핑
 // ---------------------------------------------------------------------------
 
-function buildSpendingBenefit(piece: NormalizedSpendingBenefitPiece): SpendingBenefit {
+function buildSpendingBenefit(
+  piece: NormalizedSpendingBenefitPiece,
+  exclusiveGroupId: ExclusiveGroupId | null,
+): SpendingBenefit {
   const name = unwrapParsed(piece.name);
   const requiredTierId = asPerformanceTierIdOrNull(unwrapParsed(piece.requiredTierId));
   const target = unwrapParsed(piece.target);
@@ -155,14 +165,17 @@ function buildSpendingBenefit(piece: NormalizedSpendingBenefitPiece): SpendingBe
   const base = {
     id: asBenefitId(piece.benefitId),
     name,
-    // placeholder — 위 모듈 docstring 참고. 실제 배타 그룹 로직이 생기면 교체한다.
+    // priority는 tier별로 계산하지 않는다 — eligibility.ts의 배타 그룹 승자 결정은
+    // requiredTierId가 가리키는 tier rank를 먼저 비교하고, priority는 tier rank가 완전히
+    // 같을 때만 참고하는 tie-breaker다. 다구간 분해로 생성되는 benefit들은 서로 다른
+    // threshold(= 다른 tier rank)를 갖는 것이 전제이므로 이 값으로 충분하다.
     priority: 0,
     requiredTierId,
     target,
     minMonthlySpend,
     limits,
     sharedCapId,
-    exclusiveGroupId: null,
+    exclusiveGroupId,
   };
 
   // `reward`(외곽 outcome)가 parsed라는 것은 `detectReward()`의 구현상 rateBps/currency 또는
@@ -330,9 +343,21 @@ export function toDomainCard(normalized: NormalizedCard): ToDomainCardResult {
   const unverifiedConditions: UnverifiedCondition[] = [];
 
   for (const benefit of normalized.benefits) {
+    // 이 row(`benefit`)에서 나온 fully-parsed spendingBenefit piece가 2개 이상이면(구간별
+    // 분해, D) 그 piece들만 같은 exclusiveGroupId로 묶는다. perk piece는 세지 않는다 —
+    // exclusiveGroupId는 `SpendingBenefit`에만 있는 필드다. 1개뿐이면(분해 없음) 지금까지와
+    // 동일하게 `null`이다.
+    const fullyParsedSpendingBenefitCount = benefit.pieces.filter(
+      (p) => p.kind === "spendingBenefit" && isPieceFullyParsed(p),
+    ).length;
+    const exclusiveGroupId =
+      fullyParsedSpendingBenefitCount >= 2
+        ? asExclusiveGroupId(createExclusiveGroupId(cardIdentity.cardAdId, benefit.sourceBenefitOrder))
+        : null;
+
     for (const piece of benefit.pieces) {
       if (isPieceFullyParsed(piece)) {
-        if (piece.kind === "spendingBenefit") spendingBenefits.push(buildSpendingBenefit(piece));
+        if (piece.kind === "spendingBenefit") spendingBenefits.push(buildSpendingBenefit(piece, exclusiveGroupId));
         else perks.push(buildPerk(piece));
         continue;
       }

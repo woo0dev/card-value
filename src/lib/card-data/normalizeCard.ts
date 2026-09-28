@@ -28,12 +28,43 @@ import type { BasisPoints, CategoryTarget, SpendingCategory, Won } from "../reco
  * (문단 배열의 배열)과 `benefit_summary`에서만 읽는다.
  */
 
+/**
+ * 실제 `card_value_benefits.csv`의 `benefit_category` 값(전수 조사 결과 서로 다른 값 40개)
+ * 중, 하나의 `SpendingCategory`로 명확하게 대응되는 라벨만 담는다. 이 목록에 없는 라벨은
+ * (매핑표가 부족해서든, 애초에 여러 카테고리로 해석될 수 있어서든) `detectTarget()` 아래
+ * 분기에서 `AMBIGUOUS_TARGET_CATEGORY`로 남는다 — 억지로 끼워 맞추지 않는다.
+ *
+ * 넣지 않은 것들(예시, 이유):
+ * - "쇼핑": online/offline_shopping 중 어느 쪽인지 라벨만으로 알 수 없음.
+ * - "관리비"/"공과금": utilities/tax 등 여러 카테고리로 해석될 수 있음(다른 benefit 원문에서
+ *   "공과금"이 국세/지방세까지 포함하는 것으로 쓰이는 사례를 실제로 확인함).
+ * - "레저"/"뷰티"/"오토"/"육아"/"반려동물"/"금융"/"법인"/"사업자"/"하이패스"/"생활" 등:
+ *   `SpendingCategory`(21종) 중 하나로 단정할 근거가 부족함.
+ * - "포인트/캐시백"/"연회비지원"/"프리미엄"/"바우처"/"간편결제"/"국민행복카드"/"그린카드"/
+ *   "체크카드겸용"/"Priority Pass"/"경차유류환급"/"수수료 우대"/"납부 혜택": 소비 카테고리가
+ *   아니라 보상 방식/카드 등급/부가혜택/결제수단/프로그램명을 나타내는 라벨이라 애초에
+ *   대상이 아님.
+ */
 const CATEGORY_BY_RAW_LABEL: ReadonlyMap<string, SpendingCategory> = new Map([
   ["주유", "fuel"],
   ["통신", "telecom"],
   ["카페/베이커리", "cafe"],
   ["편의점", "convenience_store"],
   ["의료", "medical"],
+  // 아래는 이번 확장에서 추가. 전부 라벨이 가리키는 대상이 하나의 SpendingCategory로만
+  // 해석되는 경우만 담았다(실제 CSV 값 기준, 임의 추정 아님).
+  ["외식", "dining"],
+  ["대중교통", "public_transport"],
+  ["교육", "education"],
+  ["영화", "entertainment"],
+  ["문화", "entertainment"],
+  ["항공마일리지", "travel"],
+  // "대형마트"(이마트/홈플러스/롯데마트 등)는 실제로는 식료품 외 품목도 포함하지만,
+  // 21개 SpendingCategory 중 가장 근접한 단일 대상은 grocery다.
+  ["대형마트", "grocery"],
+  // "외화결제"는 해외통화 결제를 뜻해 `detectTarget()`이 이미 원문 텍스트의 "해외"를
+  // 인식하는 것과 같은 개념(overseas)이다.
+  ["외화결제", "overseas"],
 ]);
 
 /**
@@ -52,10 +83,30 @@ const NAMED_MERCHANT_MARKERS = ["스타벅스", "커피빈", "투썸플레이스
 const TIER_CAP_LINE =
   /^(\d+)구간\s*\((\d+)만원\s*이상(?:\s*~\s*\d+만원\s*미만)?\)\s*:\s*(\d+)만원\s*$/;
 
+/**
+ * `TIER_CAP_LINE`과 구간/threshold 구조(`N구간 (X만원 이상[~Y만원 미만])`)는 같지만
+ * 끝맺음이 "：Z만원" 하나가 아니라 "：Z만원 청구할인"/"：Z천원 할인"/"：월 이용금액 Z만원까지
+ * 청구할인"처럼 원/천원/만원 단위 + "청구할인"/"할인"로 끝나는 실제 표현(예: KB국민
+ * 굿데이카드 "1구간(전월 이용실적 30만원 이상 60만원 미만) : 월 이용금액 20만원까지
+ * 청구할인"). 괄호 안에 "전월 (이용)실적"이 threshold 숫자 앞에 붙는 표현도 실제 데이터에서
+ * 확인되어 함께 허용한다. `TIER_CAP_LINE`이 이미 처리하는 줄과는 끝맺음이 겹치지 않는다
+ * (하나는 숫자+만원으로 줄이 끝나야 하고, 다른 하나는 반드시 "청구할인"/"할인"로 끝나야 한다).
+ */
+const TIER_CAP_LINE_ALT =
+  /^(\d+)구간\s*\((?:전월\s*(?:이용)?실적\s*)?(\d+)만원\s*이상(?:\s*~?\s*\d+만원\s*미만)?\)\s*:\s*(?:월\s*이용금액\s*)?([\d,]+)(만원|천원|원)\s*(?:까지\s*)?(?:청구할인|할인)\s*$/;
+
 interface TierCapMatch {
   readonly thresholdWon: number;
   readonly capWon: number;
   readonly line: string;
+}
+
+/** "12,000" 같은 콤마 포함 숫자를 단위(만원/천원/원)에 맞춰 원 단위 정수로 바꾼다. */
+function altCapAmountToWon(amountText: string, unit: string): number {
+  const amount = Number(amountText.replace(/,/g, ""));
+  if (unit === "만원") return amount * 10000;
+  if (unit === "천원") return amount * 1000;
+  return amount;
 }
 
 function asWon(value: number): Won {
@@ -104,12 +155,27 @@ function findTierCapMatches(lines: readonly string[]): readonly TierCapMatch[] {
   const matches: TierCapMatch[] = [];
   for (const rawLine of lines) {
     const line = rawLine.trim();
-    const m = TIER_CAP_LINE.exec(line);
-    if (!m) continue;
-    const thresholdManwon = Number(m[2]);
-    const capManwon = Number(m[3]);
-    if (!isNonNegativeSafeInteger(thresholdManwon) || !isNonNegativeSafeInteger(capManwon)) continue;
-    matches.push({ thresholdWon: thresholdManwon * 10000, capWon: capManwon * 10000, line });
+
+    const exact = TIER_CAP_LINE.exec(line);
+    if (exact) {
+      const thresholdManwon = Number(exact[2]);
+      const capManwon = Number(exact[3]);
+      if (isNonNegativeSafeInteger(thresholdManwon) && isNonNegativeSafeInteger(capManwon)) {
+        matches.push({ thresholdWon: thresholdManwon * 10000, capWon: capManwon * 10000, line });
+      }
+      continue;
+    }
+
+    // 기존 TIER_CAP_LINE에 안 걸렸을 때만 끝맺음이 다른 표현을 시도한다 — 한 줄이 두
+    // 정규식에 동시에 매칭될 일은 없다(끝맺음 요구 조건이 서로 배타적이다).
+    const alt = TIER_CAP_LINE_ALT.exec(line);
+    if (alt) {
+      const thresholdManwon = Number(alt[2]);
+      const capWon = altCapAmountToWon(alt[3], alt[4]);
+      if (isNonNegativeSafeInteger(thresholdManwon) && isNonNegativeSafeInteger(capWon)) {
+        matches.push({ thresholdWon: thresholdManwon * 10000, capWon, line });
+      }
+    }
   }
   return matches;
 }
@@ -256,16 +322,21 @@ function detectReward(
     return { status: "unsupported", code: "PER_TRANSACTION_MINIMUM", provenance: provenanceFor(combinedText) };
   }
 
-  // 단순 퍼센트: "10% 할인", "5% 할인 캐시백"처럼 정수 %와 할인/캐시백 단어가 함께 있는 경우만.
-  // 소수 퍼센트("1.5%")는 이 정수 전용 패턴에 매칭되지 않아 그대로 unverified로 남는다
-  // (§11 "소수 퍼센트나 복합 rate는 이번 단계에서 억지로 처리하지 마라").
-  const percentMatch = /(\d+)%/.exec(summary);
+  // 단순 퍼센트: "10% 할인", "1.5% 할인 캐시백"처럼 %와 할인/캐시백 단어가 함께 있는 경우.
+  // 정수와 소수(최대 소수 둘째 자리, 즉 1bp=0.01% 단위)를 문자열 자릿수 계산으로 정확히
+  // basis point 정수로 바꾼다 — `Number("1.5") * 100`처럼 부동소수점 곱셈을 쓰지 않는다.
+  // 소수 셋째 자리 이상("1.555%")은 1bp보다 세밀해 정수 basis point로 정확히 표현할 수
+  // 없으므로 반올림해서 추측하지 않고 매칭시키지 않는다 — 그대로 unverified로 남는다.
+  const percentMatch = /(\d+)(?:\.(\d{1,2}))?%/.exec(summary);
   const hasDiscountWord = summary.includes("할인");
   const hasCashbackWord = summary.includes("캐시백");
   if (percentMatch && (hasDiscountWord || hasCashbackWord)) {
-    const percent = Number(percentMatch[1]);
-    if (isNonNegativeSafeInteger(percent)) {
-      const rateBps = asBasisPoints(percent * 100);
+    const wholePercent = Number(percentMatch[1]);
+    const fractionDigits = (percentMatch[2] ?? "").padEnd(2, "0");
+    const fractionBps = Number(fractionDigits);
+    const rateBpsRaw = wholePercent * 100 + fractionBps;
+    if (isNonNegativeSafeInteger(wholePercent) && isNonNegativeSafeInteger(rateBpsRaw)) {
+      const rateBps = asBasisPoints(rateBpsRaw);
       const form: "discount" | "cashback" = hasCashbackWord ? "cashback" : "discount";
       const p = provenanceFor(`benefit_summary="${summary}"`);
       return {
@@ -280,6 +351,14 @@ function detectReward(
       };
     }
   }
+
+  // 포인트 적립("포인트 적립", "적립률" 등)은 `RewardCurrency`의 `points` variant로 표현할
+  // 개념 자체는 domain에 이미 있다. 하지만 이 variant는 `PointValuation`(원화 환산 계수 +
+  // 출처)을 필수로 요구하는데, 현재 CSV에는 포인트→원화 환산율이나 그 출처를 담은 컬럼이
+  // 전혀 없다. Domain Design Decision 10("임의의 1P=1원 가정을 기본값으로 사용하지
+  // 않는다")에 따라 이 값을 지어낼 수 없으므로, 이번 확장에서도 포인트 기반 reward는
+  // parsed로 만들지 않는다 — 아래 fallback을 그대로 통해 unverified(NO_NUMERIC_VALUE_FOUND)로
+  // 남는다. "포인트인지 원인지 불명확하면 추측하지 않는다"를 그대로 따른 것이다.
 
   // 명확한 월 정액: "매월 3,000원 캐시백" / "월 5,000원 할인"처럼 월 단위가 명시된 경우만.
   // "건당"/"1회" 문맥은 위에서 이미 걸러졌으므로 여기 도달했다면 월 단위로 본다.
@@ -457,6 +536,92 @@ export function findUnsupportedCode(piece: NormalizedBenefitPiece): UnsupportedC
   return null;
 }
 
+/**
+ * 안전하게 확정된 다구간(D) row를 tier 개수만큼의 `NormalizedSpendingBenefitPiece`로
+ * 분해한다. `target`/`reward`/`minMonthlySpend`는 tier마다 실제로 값이 달라지는 필드가
+ * 아니다(D의 안전 범위 자체가 "구간마다 requiredTierId/limits만 다르고 나머지는 같다"로
+ * 한정돼 있다) — 그래도 각 piece가 자신만의 정확한 provenance(pieceIndex 포함)를 갖도록
+ * `detectTarget`/`detectReward`를 tier마다 다시 호출한다. 두 함수 모두 순수 함수라 같은
+ * 입력에는 항상 같은 값을 반환하므로, 이렇게 해도 tier 사이에 값 자체가 달라지지 않는다.
+ *
+ * exclusiveGroupId/priority는 이 piece 타입에 없다(기존 단일 piece 경로와 동일한 이유 —
+ * `NormalizedSpendingBenefitPiece`의 문서 참고). 실제 배타 그룹 구성은 `toDomainCard()`가
+ * `NormalizedBenefit.pieces`가 2개 이상인지를 보고 결정한다.
+ */
+function buildTierDecomposedPieces(
+  card: RawCardRecord,
+  raw: RawBenefitRecord,
+  lines: readonly string[],
+  summary: string,
+  benefitOrder: number,
+  tierCapMatches: readonly TierCapMatch[],
+  provenanceFor: (
+    conditionText: string,
+    pieceIndex: number | null,
+    originalBenefitText: string | null,
+  ) => NormalizationProvenance,
+  fullBenefitText: string,
+): readonly NormalizedSpendingBenefitPiece[] {
+  // threshold 오름차순으로 pieceIndex를 부여한다 — 정답성에는 영향이 없지만(승자 결정은
+  // eligibility.ts가 threshold 값 자체로 하지 배열 순서로 하지 않는다) id/provenance가
+  // "1구간, 2구간, ..." 순서와 일치해 읽기 쉽다.
+  const sortedMatches = [...tierCapMatches].sort((a, b) => a.thresholdWon - b.thresholdWon);
+
+  return sortedMatches.map((m, pieceIndex) => {
+    const pieceProvenanceFor = (conditionText: string): NormalizationProvenance =>
+      provenanceFor(conditionText, pieceIndex, fullBenefitText);
+
+    const { outcome: target } = detectTarget(raw.benefitCategory, lines, pieceProvenanceFor);
+    const reward = detectReward(summary, lines, pieceProvenanceFor);
+    const minMonthlySpend: NormalizationOutcome<Won | null> = fullBenefitText.includes("최소")
+      ? {
+          status: "unverified",
+          reasonCode: "AMBIGUOUS_CAP_VALUE",
+          provenance: pieceProvenanceFor('"최소" 문구가 있어 별도 최소 이용금액 조건 여부를 이번 단계에서 판단하지 않음'),
+        }
+      : {
+          status: "parsed",
+          confidence: "exact",
+          value: null,
+          provenance: pieceProvenanceFor('"최소" 문구 없음 — 구간 조건 외 별도 최소 이용금액 없음'),
+        };
+
+    const piece: NormalizedSpendingBenefitPiece = {
+      kind: "spendingBenefit",
+      benefitId: createBenefitId(card.cardAdId, benefitOrder, pieceIndex),
+      name: {
+        status: "parsed",
+        confidence: "exact",
+        value: summary,
+        provenance: pieceProvenanceFor(`benefit_summary="${summary}"`),
+      },
+      requiredTierId: {
+        status: "parsed",
+        confidence: "exact",
+        value: createPerformanceTierId(card.cardAdId, asWon(m.thresholdWon)),
+        provenance: pieceProvenanceFor(`"${m.line}"`),
+      },
+      target,
+      minMonthlySpend,
+      reward,
+      limits: {
+        status: "parsed",
+        confidence: "exact",
+        value: { monthlyRewardCap: asWon(m.capWon), monthlyEligibleSpendCap: null },
+        provenance: pieceProvenanceFor(`"${m.line}"`),
+      },
+      sharedCapId: {
+        status: "parsed",
+        confidence: "exact",
+        value: null,
+        provenance: pieceProvenanceFor('"통합"/"합산" 문구 없음 — 이 benefit 단독 한도(다구간 분해로 생성된 piece)'),
+      },
+      provenance: pieceProvenanceFor(fullBenefitText.slice(0, 200)),
+    };
+    return piece;
+  });
+}
+
 function processBenefitRow(
   card: RawCardRecord,
   raw: RawBenefitRecord,
@@ -517,6 +682,83 @@ function processBenefitRow(
   // 통합", "학원/피트니스 통합")에서만 일관되게 나타나 더 신뢰할 수 있는 신호다.
   const hasSharedGroupSignal = fullBenefitText.includes("통합");
 
+  // "월 5회", "일 1회", "연 12회"처럼 금액이 아니라 횟수로 상한을 두는 조건. 원래는 아래
+  // `limits`/`sharedCapId` 판정 직전에 선언돼 있었으나, D(다구간 분해) 안전 조건 판정이
+  // 이 값을 먼저 참조해야 해서 위로 옮겼다 — `fullBenefitText`에 대한 순수 정규식 매칭일
+  // 뿐이라 위치를 옮겨도 값 자체는 달라지지 않는다.
+  const usageCountLimitMatch = /(?:월|일|연)\s*\d+\s*회/.exec(fullBenefitText);
+
+  // ---------------------------------------------------------------------------
+  // D: 안전한 다구간(multi-tier) 분해
+  // ---------------------------------------------------------------------------
+  //
+  // 아래 조건을 모두 만족할 때만 이 row를 여러 piece로 분해한다. 하나라도 어긋나면 억지로
+  // 분해하지 않고 기존 단일 piece 경로(아래)로 넘어가 지금까지와 동일하게 처리한다(2개 이상
+  // matches는 기존처럼 requiredTierId/limits가 AMBIGUOUS_*로 unverified 유지).
+  //
+  // - `tierCapMatches.length >= 2`: 구간이 실제로 2개 이상 존재.
+  // - `!hasSharedGroupSignal`: "통합" 한도가 아님 — 어느 benefit들과 한도를 나눠 쓰는지
+  //   카드 전체를 훑어야 알 수 있는 구조라 이번 범위 밖이다.
+  // - `!usageCountLimitMatch`: 횟수 제한이 아님 — 원화 한도로 표현할 수 없다.
+  // - `!hasAnnualPerformanceSignal`: "연간 결제실적"처럼 월간이 아닌 기간 조건이 섞여
+  //   있지 않음. 실제 데이터(cardAdId=2487)에서 월간 구간표와 별개로 "연간 결제실적
+  //   1,500만원 충족 가정" 같은 문구가 같은 row 안에 함께 나타나는 사례가 확인되었다 —
+  //   `PerformanceTier`/`MonthlySpending`은 월간 실적만 다루므로 섞이면 분해하지 않는다.
+  // - `tierLineCount === tierCapMatches.length`: 텍스트의 모든 "N구간" 줄이 예외 없이
+  //   매칭됐음. 실제 데이터(cardAdId=10302)에서 "1만 5천원"처럼 숫자와 한글이 섞인 금액
+  //   표기 때문에 3개 구간 중 2개만 매칭된 사례가 확인되었다 — 일부만 매칭된 채로
+  //   분해하면 중간 구간이 통째로 빠져, 그 구간에 해당하는 사용자가 더 낮은(틀린) 구간의
+  //   혜택으로 잘못 계산될 위험이 있다. 그래서 전부 매칭되지 않으면 전혀 분해하지 않는다.
+  // - `distinctThresholdCount === tierCapMatches.length`: 매칭된 threshold가 서로 중복되지
+  //   않음. 실제 데이터(cardAdId=10481)에서 "①~④ 중 택1"류 옵션 번들처럼 같은 구간표가
+  //   반복돼 동일한 threshold가 여러 번 매칭되는 사례가 확인되었다 — 이런 row도 안전하게
+  //   구간과 혜택을 1:1로 결정할 수 없으므로 분해하지 않는다.
+  const tierLineCount = lines.filter((l) => /^\d+구간/.test(l.trim())).length;
+  const hasAnnualPerformanceSignal = /연간\s*(결제)?\s*실적/.test(fullBenefitText);
+  const distinctThresholdCount = new Set(tierCapMatches.map((m) => m.thresholdWon)).size;
+  const isSafeMultiTierDecomposition =
+    tierCapMatches.length >= 2 &&
+    !hasSharedGroupSignal &&
+    !usageCountLimitMatch &&
+    !hasAnnualPerformanceSignal &&
+    tierLineCount === tierCapMatches.length &&
+    distinctThresholdCount === tierCapMatches.length;
+
+  if (isSafeMultiTierDecomposition) {
+    const pieces = buildTierDecomposedPieces(
+      card,
+      raw,
+      lines,
+      summary,
+      benefitOrder,
+      tierCapMatches,
+      provenanceFor,
+      fullBenefitText,
+    );
+    // 여러 piece 중 하나라도 unsupported 필드가 있으면 그중 먼저 발견된 code를 카드 단위
+    // 경고로 남긴다 — 단일 piece 경로의 `dominantUnsupportedCode`와 같은 목적이다.
+    let dominantUnsupportedCode: UnsupportedConditionCode | null = null;
+    for (const p of pieces) {
+      const code = findUnsupportedCode(p);
+      if (code !== null) {
+        dominantUnsupportedCode = code;
+        break;
+      }
+    }
+    return {
+      benefit: { sourceBenefitOrder: benefitOrder, pieces },
+      wholeRowWarning:
+        dominantUnsupportedCode !== null
+          ? {
+              code: dominantUnsupportedCode,
+              message: "일부 필드가 범위 밖 조건으로 unsupported 처리됨(피스 자체는 보존됨, 다구간 분해)",
+              provenance: provenanceFor(fullBenefitText.slice(0, 200), null, fullBenefitText),
+            }
+          : null,
+      tierThresholds,
+    };
+  }
+
   let requiredTierId: NormalizationOutcome<string | null>;
   if (tierCapMatches.length === 1) {
     const m = tierCapMatches[0];
@@ -544,10 +786,17 @@ function processBenefitRow(
     };
   }
 
-  // "월 5회", "일 1회", "연 12회"처럼 금액이 아니라 횟수로 상한을 두는 조건. 요율/대상
+  // (`usageCountLimitMatch`는 D 안전 조건 판정을 위해 이 함수 위쪽으로 옮겼다 — 요율/대상
   // 자체는 맞을 수 있지만 실제 월 혜택은 결제 건수에 의존하므로 원화 한도로 표현할 수
-  // 없다 — `limits`(원화 상한)를 확정하지 않고 unsupported로 남긴다.
-  const usageCountLimitMatch = /(?:월|일|연)\s*\d+\s*회/.exec(fullBenefitText);
+  // 없다는 이유는 그대로다.)
+
+  // "할인한도 없이"/"적립한도 없이": 원문이 스스로 한도가 없다고 명시한 경우다. 이건
+  // "한도를 확인할 수 없음"(unverified)이 아니라 "한도 자체가 없음"이라는 확정된 사실이며,
+  // `BenefitLimits.monthlyRewardCap`은 이미 `Won | null`이고 `null`이 "한도 없음"을 뜻하도록
+  // 정의돼 있다(types/benefit.ts). 그래서 숫자가 없다는 이유만으로 임의로 null을 만드는 게
+  // 아니라, 원문이 직접 "없다"고 말하는 이 두 표현만 대상으로 한다("한도 없이"만 있고
+  // "할인"/"적립" 중 어느 쪽 한도인지 원문에서 특정하지 않는 경우는 대상에서 제외한다).
+  const noRewardCapMatch = /할인한도\s*없이|적립한도\s*없이/.exec(fullBenefitText);
 
   let limits: NormalizationOutcome<{ monthlyRewardCap: Won | null; monthlyEligibleSpendCap: Won | null }>;
   let sharedCapId: NormalizationOutcome<string | null>;
@@ -581,6 +830,19 @@ function processBenefitRow(
       confidence: "exact",
       value: null,
       provenance: pieceProvenanceFor('"통합"/"합산" 문구 없음 — 이 benefit 단독 한도'),
+    };
+  } else if (noRewardCapMatch) {
+    limits = {
+      status: "parsed",
+      confidence: "exact",
+      value: { monthlyRewardCap: null, monthlyEligibleSpendCap: null },
+      provenance: pieceProvenanceFor(`"${noRewardCapMatch[0]}" — 원문이 한도 없음을 직접 명시`),
+    };
+    sharedCapId = {
+      status: "parsed",
+      confidence: "exact",
+      value: null,
+      provenance: pieceProvenanceFor('"통합"/"합산" 문구 없음 — 이 benefit 단독 한도(한도 자체가 없음)'),
     };
   } else {
     limits = {

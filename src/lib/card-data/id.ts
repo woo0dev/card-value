@@ -22,3 +22,13 @@ export function createPerformanceTierId(cardAdId: string, thresholdWon: Won): st
 export function createSharedCapId(cardAdId: string, index: number): string {
   return `${cardAdId}-cap${index}`;
 }
+
+/**
+ * 하나의 raw benefit row가 여러 `SpendingBenefit`(구간별 분해)으로 나뉠 때, 그 조각들을
+ * 배타 그룹으로 묶기 위한 id. `cardAdId`와 `sourceBenefitOrder`만으로 결정되는 값이며,
+ * `createBenefitId`가 만드는 `benefitId` 문자열을 파싱해서 만들지 않는다(이 파일 상단
+ * 문서 참고 — 문자열은 유일 식별자일 뿐 역파싱 대상이 아니다).
+ */
+export function createExclusiveGroupId(cardAdId: string, benefitOrder: number): string {
+  return `${cardAdId}-b${benefitOrder}-group`;
+}
