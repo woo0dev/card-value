@@ -32,3 +32,14 @@ export function createSharedCapId(cardAdId: string, index: number): string {
 export function createExclusiveGroupId(cardAdId: string, benefitOrder: number): string {
   return `${cardAdId}-b${benefitOrder}-group`;
 }
+
+/**
+ * 서로 다른 raw benefit row(`sourceBenefitOrder`가 다름)가 의미상 완전히 동일한
+ * `SpendingBenefit`을 중복 표현할 때, 그 사본들을 배타 그룹으로 묶기 위한 id.
+ * `createExclusiveGroupId`(같은 row 내부의 구간별 분해)와는 별개의 id 공간이다 —
+ * `cardAdId` + 카드 내에서 발견 순서로 매기는 `index`만으로 결정되며 특정
+ * `sourceBenefitOrder`에 묶이지 않는다.
+ */
+export function createDuplicateGroupId(cardAdId: string, index: number): string {
+  return `${cardAdId}-dup${index}`;
+}

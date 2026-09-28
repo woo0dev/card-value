@@ -7,7 +7,7 @@ import type {
   NormalizedSpendingBenefitPiece,
 } from "./normalizeTypes";
 import { findUnsupportedCode, isPieceFullyParsed } from "./normalizeCard";
-import { createExclusiveGroupId } from "./id";
+import { createDuplicateGroupId, createExclusiveGroupId } from "./id";
 import type {
   BenefitId,
   Card,
@@ -41,11 +41,18 @@ import type {
  *
  * `priority`/`exclusiveGroupId`는 원문에서 파싱되는 값이 아니다. `priority`는 항상
  * `0`이다(§`buildSpendingBenefit` 참고 — eligibility.ts의 배타 그룹 승자 결정은 tier
- * rank를 먼저 비교하므로 이걸로 충분하다). `exclusiveGroupId`는 `NormalizedBenefit.pieces`
- * 배열 길이로 결정한다 — 같은 raw row(`benefit.pieces`)에서 fully-parsed spendingBenefit
- * piece가 2개 이상 나오면(구간별 분해, D) 그 piece들에 같은 `exclusiveGroupId`
- * (`createExclusiveGroupId(cardAdId, sourceBenefitOrder)`)를 부여해 서로 배타 경쟁하게
- * 하고, 1개뿐이면 지금까지와 동일하게 `null`이다.
+ * rank를 먼저 비교하므로 이걸로 충분하다). `exclusiveGroupId`는 두 단계로 결정된다:
+ *
+ * 1) 같은 raw row(`benefit.pieces`)에서 fully-parsed spendingBenefit piece가 2개 이상
+ *    나오면(구간별 분해, D) 그 piece들에 같은 `exclusiveGroupId`
+ *    (`createExclusiveGroupId(cardAdId, sourceBenefitOrder)`)를 부여해 서로 배타 경쟁하게
+ *    하고, 1개뿐이면 `null`이다.
+ * 2) 1)에서 `null`로 남은(= 같은 row 그룹에 속하지 않은) `SpendingBenefit`들 중, 서로 다른
+ *    row에서 나왔는데도 `target`/`reward`/`limits`/`requiredTierId`/`minMonthlySpend`가
+ *    전부 동일한 것들이 있으면(§`mergeDuplicateLogicalBenefits` 참고 — 카드 원본 데이터가
+ *    같은 혜택을 카테고리 태그별로 중복 등록한 경우) 그것들도 새 `exclusiveGroupId`
+ *    (`createDuplicateGroupId`)로 묶는다. 1)의 same-row 그룹과는 별개의 id 공간이며 절대
+ *    섞이지 않는다 — 1)에서 이미 그룹이 부여된 benefit은 2)의 후보에서 제외된다.
  */
 
 // ---------------------------------------------------------------------------
@@ -288,6 +295,93 @@ function perkFieldEntries(
 }
 
 // ---------------------------------------------------------------------------
+// Cross-row duplicate(logical benefit) 병합
+// ---------------------------------------------------------------------------
+
+/**
+ * 서로 다른 raw row에서 나온 두 `SpendingBenefit`이 의미상 완전히 같은 혜택인지 판정하는
+ * key. `target`/`reward`(`kind` 포함)/`limits`/`requiredTierId`/`minMonthlySpend` 다섯
+ * 필드가 전부 같을 때만 같은 key를 갖는다. `id`/`name`/`priority`/`sharedCapId`/
+ * `exclusiveGroupId`는 의도적으로 제외한다 — dedupe 기준으로 합의된 필드가 아니다.
+ * `target.categories`는 원문 배열의 순서에 의미가 없으므로 정렬 후 비교한다.
+ */
+function duplicateSemanticKey(benefit: SpendingBenefit): string {
+  const target = {
+    type: benefit.target.type,
+    categories: [...benefit.target.categories].sort(),
+  };
+  const reward =
+    benefit.kind === "rate"
+      ? { kind: "rate" as const, rateBps: benefit.rateBps, currency: benefit.currency }
+      : { kind: "fixed" as const, monthlyAmount: benefit.monthlyAmount };
+  return JSON.stringify({
+    target,
+    reward,
+    limits: benefit.limits,
+    requiredTierId: benefit.requiredTierId,
+    minMonthlySpend: benefit.minMonthlySpend,
+  });
+}
+
+/**
+ * 서로 다른 raw row(다른 `sourceBenefitOrder`)에서 나왔지만 의미상 완전히 동일한
+ * `SpendingBenefit`이 카드 내에 여럿 있으면(예: 같은 혜택이 카테고리 브라우징 탭마다
+ * 반복 등록된 raw 데이터) 같은 `exclusiveGroupId`로 묶는다 — 계산은 바꾸지 않는다.
+ * eligibility.ts의 기존 배타 그룹 승자 선택(`requiredTierId` rank → `priority` → `id`
+ * 오름차순)이 그대로 작동해, 동일한 tier/priority를 가진 중복 후보 중 정확히 하나만
+ * 남기고 나머지는 `SUPERSEDED_IN_EXCLUSIVE_GROUP`으로 처리된다.
+ *
+ * `validateCard()`의 `EXCLUSIVE_GROUP_AMBIGUOUS_ORDER` 경고는 이 그룹에서도 그대로
+ * 발생한다(의도적으로 억제하지 않는다) — 이 dedupe로 묶인 후보는 정의상 `requiredTierId`와
+ * `priority`가 항상 동일하므로 매번 이 경고 조건에 해당하는데, 그 경고의 원래 의미
+ * ("우선순위를 구분할 신호가 없어 id로 tie-break했다")가 이 상황에도 문자 그대로
+ * 참이기 때문이다 — 새 warning 종류를 만들지 않고 기존 경고를 그대로 재사용한다.
+ *
+
+ * - `exclusiveGroupId !== null`인 benefit(같은 row의 tier 분해, D)은 후보에서 제외한다 —
+ *   기존 same-row 그룹과 절대 섞이지 않는다. 같은 row에서 fully-parsed piece가 2개
+ *   이상이면 항상 같은 `exclusiveGroupId`를 이미 받으므로, `exclusiveGroupId === null`인
+ *   후보는 구조적으로 항상 서로 다른 row에서 나온 것이다 — 별도로 `sourceBenefitOrder`를
+ *   비교할 필요가 없다.
+ * - key가 같은 후보가 2개 이상일 때만 새 `exclusiveGroupId`를 부여한다. 1개뿐이면
+ *   경쟁 상대가 없으므로 `null`을 그대로 유지한다.
+ * - target/reward/limits/requiredTierId/minMonthlySpend 중 하나라도 다르면 다른 key이므로
+ *   묶이지 않는다 — 같은 원문이라도 실제로 서로 다른 카테고리/요율을 가리키는 benefit
+ *   (예: 하나의 "통합" 문구가 `cafe`/`convenience_store`/`medical`처럼 서로 다른
+ *   카테고리에 반복 적용되는 경우, 또는 reward 수치 자체가 다른 경우)은 이 조건에서
+ *   자동으로 걸러져 별개의 benefit으로 남는다.
+ */
+function mergeDuplicateLogicalBenefits(
+  cardAdId: string,
+  spendingBenefits: readonly SpendingBenefit[],
+): readonly SpendingBenefit[] {
+  const candidateGroups = new Map<string, SpendingBenefit[]>();
+  for (const benefit of spendingBenefits) {
+    if (benefit.exclusiveGroupId !== null) continue;
+    const key = duplicateSemanticKey(benefit);
+    const members = candidateGroups.get(key) ?? [];
+    members.push(benefit);
+    candidateGroups.set(key, members);
+  }
+
+  const newGroupIdByBenefitId = new Map<BenefitId, ExclusiveGroupId>();
+  let groupIndex = 0;
+  for (const members of candidateGroups.values()) {
+    if (members.length < 2) continue;
+    const groupId = asExclusiveGroupId(createDuplicateGroupId(cardAdId, groupIndex));
+    groupIndex++;
+    for (const member of members) newGroupIdByBenefitId.set(member.id, groupId);
+  }
+
+  if (newGroupIdByBenefitId.size === 0) return spendingBenefits;
+
+  return spendingBenefits.map((benefit) => {
+    const groupId = newGroupIdByBenefitId.get(benefit.id);
+    return groupId === undefined ? benefit : { ...benefit, exclusiveGroupId: groupId };
+  });
+}
+
+// ---------------------------------------------------------------------------
 // 공개 API
 // ---------------------------------------------------------------------------
 
@@ -397,7 +491,7 @@ export function toDomainCard(normalized: NormalizedCard): ToDomainCardResult {
     // 전까지는 이 필드를 신뢰할 수 없는 known limitation으로 취급해야 한다).
     performanceExcludedCategories: [],
     sharedCaps: [],
-    spendingBenefits,
+    spendingBenefits: mergeDuplicateLogicalBenefits(cardIdentity.cardAdId, spendingBenefits),
     perks,
     source,
     unverifiedConditions,
