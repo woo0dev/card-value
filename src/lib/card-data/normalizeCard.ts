@@ -95,6 +95,16 @@ const TIER_CAP_LINE =
 const TIER_CAP_LINE_ALT =
   /^(\d+)구간\s*\((?:전월\s*(?:이용)?실적\s*)?(\d+)만원\s*이상(?:\s*~?\s*\d+만원\s*미만)?\)\s*:\s*(?:월\s*이용금액\s*)?([\d,]+)(만원|천원|원)\s*(?:까지\s*)?(?:청구할인|할인)\s*$/;
 
+/**
+ * "전월 이용금액에 관계없이"만을 대상으로 한다 — 원문이 전월실적 조건 자체가 없다고
+ * 직접 명시하는, 실제 데이터에서 확인된 표현이다("관계없이"가 "할인한도"/"적립한도"가
+ * 아니라 "전월 이용금액"을 직접 수식한다). "할인한도 없이"/"적립한도 없이"만 단독으로
+ * 있는 경우는 한도가 없다는 뜻일 뿐 실적 구간 자체가 없다는 뜻은 아니므로 이 정규식의
+ * 대상이 아니다(별도 처리— `noRewardCapMatch` 참고). "무실적"/"전월실적 없이" 등 다른
+ * 동의 표현은 이번 범위에서 의도적으로 제외한다(추가 검증 없이 확장하지 않는다).
+ */
+const NO_PERFORMANCE_REQUIREMENT_MATCH = /전월\s*이용금액에\s*관계없이/;
+
 interface TierCapMatch {
   readonly thresholdWon: number;
   readonly capWon: number;
@@ -772,9 +782,22 @@ function processBenefitRow(
     } else {
       requiredTierId = { status: "unverified", reasonCode: "AMBIGUOUS_TIER_VALUE", provenance: pieceProvenanceFor(fullBenefitText) };
     }
+  } else if (tierCapMatches.length === 0 && NO_PERFORMANCE_REQUIREMENT_MATCH.test(fullBenefitText)) {
+    // 구간 문구가 아예 없는(0개) 경우 중에서도, 원문이 "전월 이용금액에 관계없이"로
+    // 실적 조건 자체가 없다고 직접 명시하는 경우만 확정된 사실(`null` = 실적 구간 조건
+    // 없음, `types/benefit.ts`의 `requiredTierId` 문서 그대로)로 다룬다. 숫자가 없다는
+    // 이유만으로 임의로 null을 만드는 게 아니라, 원문이 직접 "관계없이"라고 말하는
+    // 이 표현만 대상으로 한다(기존 `noRewardCapMatch`와 같은 원칙).
+    requiredTierId = {
+      status: "parsed",
+      confidence: "exact",
+      value: null,
+      provenance: pieceProvenanceFor('"전월 이용금액에 관계없이" — 원문이 실적 구간 조건 없음을 직접 명시'),
+    };
   } else {
-    // 0개(명시적 구간 문구 없음) 또는 2개 이상(여러 구간이 한 benefit에 섞여 있어
-    // 이번 단계의 단순 모델로는 어느 것을 요구 구간으로 볼지 결정할 수 없음).
+    // 0개(명시적 구간 문구도, 무실적 문구도 없음) 또는 2개 이상(여러 구간이 한
+    // benefit에 섞여 있어 이번 단계의 단순 모델로는 어느 것을 요구 구간으로 볼지
+    // 결정할 수 없음).
     requiredTierId = {
       status: "unverified",
       reasonCode: "AMBIGUOUS_TIER_VALUE",
