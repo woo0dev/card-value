@@ -153,12 +153,20 @@ function buildCardIdentity(
 }
 
 /**
- * `annual_fee_domestic`/`annual_fee_international`은 구조화된 숫자지만, 카드에 따라
- * `annual_fee_description`(브랜드/채널별 각주)이 그 숫자와 다른 금액을 설명하는 경우가
- * 있다 — 이 카드(1294)가 그 실제 사례다: `annual_fee_international=20000`인데
- * `annual_fee_description`은 "모바일단독 UnionPay 9천원, 국내외겸용 1만4천원"이라고
- * 적어 두 값이 서로 다르다. Domain `AnnualFee.amount`는 값 하나뿐이라 이런 경우 임의로
- * 하나를 대표값으로 고르지 않고 `unverified`로 남긴다(§8).
+ * `annual_fee_domestic`/`annual_fee_international`에서 유효한 숫자를 모아 대표 연회비를
+ * 정한다.
+ *
+ * - 숫자가 하나뿐이거나(한쪽만 존재), 둘 다 존재하고 값이 같으면 그 값을 쓴다.
+ * - 둘 다 존재하고 값이 다르면(예: 국내전용/해외겸용 연회비가 다른 카드) `AnnualFee.amount`는
+ *   값 하나뿐이라 어느 쪽을 대표값으로 써야 할지 표현할 수 없으므로 `unverified`로 남긴다.
+ * - 숫자가 하나도 없으면 `unverified`(`NO_NUMERIC_VALUE_FOUND`)로 남긴다.
+ *
+ * `annual_fee_description`(브랜드/채널/모바일단독/가족카드 등 부가 설명)이 존재한다는
+ * 사실 자체는 대표값 판단에 쓰지 않는다 — 실제 443장 데이터를 확인한 결과 이 설명의
+ * 대부분은 모바일 단독카드·가족카드처럼 "다른 상품/발급형태"의 별도 비용을 설명할
+ * 뿐이고, domestic/international 숫자 자체를 틀리게 만들지 않는다. description 원문은
+ * 이전과 동일하게 `originalCardText`에 그대로 보존하고, description이 있었는데도
+ * 숫자값을 대표값으로 채택했다는 판단 과정은 `originalConditionText`에 남긴다(아래).
  */
 function buildAnnualFee(card: RawCardRecord, extractedAt: string) {
   const provenance = (conditionText: string): NormalizationProvenance => ({
@@ -174,16 +182,6 @@ function buildAnnualFee(card: RawCardRecord, extractedAt: string) {
     extractedAt,
   });
 
-  if (card.annualFeeDescription !== null) {
-    return {
-      status: "unverified" as const,
-      reasonCode: "MULTIPLE_CONFLICTING_VALUES" as const,
-      provenance: provenance(
-        `annual_fee_description에 브랜드/채널별 금액이 별도로 기재됨: "${card.annualFeeDescription}"`,
-      ),
-    };
-  }
-
   const domestic = parseWholeNumber(card.annualFeeDomestic);
   const international = parseWholeNumber(card.annualFeeInternational);
   const candidates = [domestic, international].filter((v): v is number => v !== null);
@@ -191,13 +189,22 @@ function buildAnnualFee(card: RawCardRecord, extractedAt: string) {
 
   if (distinct.size === 1) {
     const amount = [...distinct][0] as number;
+    // description이 있어도 숫자값 판단 자체는 바뀌지 않지만, 그 판단 과정을 trace에
+    // 남긴다 — description 원문 자체는 위 `originalCardText`에 이미 보존돼 있으므로
+    // 여기서는 "존재했지만 숫자값을 대표값으로 채택했다"는 사실만 짧게 덧붙인다.
+    const descriptionNote =
+      card.annualFeeDescription !== null
+        ? " (annual_fee_description 존재 — domestic/international 숫자값을 대표값으로 채택함)"
+        : "";
     return {
       status: "parsed" as const,
       confidence: "exact" as const,
       // firstYearWaived는 텍스트에서 추측하지 않는다(§8). 별도 근거가 없으면 false를
       // 기본값으로 둔다 — 이는 "텍스트를 읽고 추론"이 아니라 명시적인 기본 정책이다.
       value: { amount: asWon(amount), firstYearWaived: false },
-      provenance: provenance(`annual_fee_domestic="${card.annualFeeDomestic ?? ""}", annual_fee_international="${card.annualFeeInternational ?? ""}"`),
+      provenance: provenance(
+        `annual_fee_domestic="${card.annualFeeDomestic ?? ""}", annual_fee_international="${card.annualFeeInternational ?? ""}"${descriptionNote}`,
+      ),
     };
   }
 
