@@ -465,7 +465,15 @@ function detectTarget(
       unsupportedCode: code,
     };
   }
-  if (combinedText.includes("간편결제")) {
+  // "간편결제" 바로 뒤에 "등록"이 오는 경우("카드 사용등록일(KB Pay 등 간편결제 등록
+  // 포함)로부터...")는 이 benefit의 결제수단 조건이 아니라, 실적유예기간을 설명하는
+  // "카드 등록 방법" 안내문이다 — 전체 데이터에서 "간편결제\s*등록" 패턴 118개 행/27개
+  // 고유 문맥을 전수 확인한 결과 예외 없이 전부 이 동일한 상용구였다. "간편결제"가
+  // 실제 결제/할인/적립 조건으로 쓰이는 경우(예: "온라인 간편결제 1% 할인", "간편결제:
+  // 삼성페이, 네이버페이...")는 "간편결제" 바로 뒤에 "등록"이 오지 않으므로 이 조건에
+  // 걸리지 않는다 — "간편결제"라는 단어 자체를 무시하는 게 아니라, 등록 안내문 문맥
+  // 하나만 좁혀서 제외한다.
+  if (/간편결제(?!\s*등록)/.test(combinedText)) {
     const code: UnsupportedConditionCode = "PAYMENT_METHOD_RESTRICTED";
     return {
       outcome: { status: "unsupported", code, provenance: provenanceFor(combinedText) },
