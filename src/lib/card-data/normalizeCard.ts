@@ -105,6 +105,47 @@ const TIER_CAP_LINE_ALT =
  */
 const NO_PERFORMANCE_REQUIREMENT_MATCH = /전월\s*이용금액에\s*관계없이/;
 
+/**
+ * 소비 카테고리 기반 혜택(spendingBenefit)이 아닌 것으로 실제 데이터에서 확인된
+ * 부가서비스 마커. 이 목록에 있다고 바로 범위 밖으로 두지 않는다 — 반드시
+ * `SPENDING_REWARD_SIGNAL`과 함께 "이 row 전체에 소비 연동 혜택 신호가 전혀 없을
+ * 때만" 적용한다(아래 `processBenefitRow()` 참고). 라운지/메탈 플레이트/발급 수수료/
+ * 발레파킹 4종으로 범위를 좁혔다 — "임신"/"출산"/"보육료"/"국가바우처"/"국제브랜드"
+ * 등은 실제 데이터에서 정상 소비 혜택 row(예: "보육료 10% 청구할인")를 오염시키는
+ * 사례가 확인되어 이번 범위에서 제외했다.
+ */
+const NON_SPENDING_MARKERS = ["라운지", "메탈 플레이트", "메탈플레이트", "발레파킹", "발레 파킹"];
+
+/**
+ * "발급 수수료"는 카드 자체의 발급 비용을 뜻하는 일반적인 표현이지만, "민원 발급
+ * 수수료"(관공서 민원서류 발급 수수료)는 카드 발급과 무관하게 "실적/적립 제외 대상"
+ * 각주에 흔히 등장하는 표현이다(전체 데이터에서 "발급 수수료" 앞에 오는 단어를 전수
+ * 확인한 결과, "민원"만 유일하게 무관한 문맥이었다). 이걸 그대로 두면 실제 소비 연동
+ * 마일리지 적립 row(cardAdId=10681, "3,000원당 1 대한항공 마일리지 법인 크레딧
+ * 적립")가 "[적립 제외 대상] 민원 발급 수수료" 각주 때문에 통째로 제외되는 오탐이
+ * 실측으로 확인되어, 이 표현만 별도로 제외한다.
+ */
+const ISSUANCE_FEE_MARKER = /(?<!민원\s?)발급\s*수수료/;
+
+function hasNonSpendingMarker(summary: string, fullBenefitText: string): boolean {
+  const combined = `${summary}\n${fullBenefitText}`;
+  return NON_SPENDING_MARKERS.some((m) => combined.includes(m)) || ISSUANCE_FEE_MARKER.test(combined);
+}
+
+/**
+ * "이 row에 소비 금액과 연동된 혜택을 암시하는 표현이 있는가"를 넓게 판단한다.
+ * `detectReward()`처럼 실제로 parsed 값까지 확정하지는 않는다 — 포인트/마일리지처럼
+ * `detectReward()`가 원화로 환산하지 못해 결국 unverified로 남기는 값도 여기서는
+ * "혜택 신호 있음"으로 본다. 그렇지 않으면 "라운지 + M포인트 적립"처럼 실제로는 소비
+ * 혜택이 함께 있는 row를 라운지 마커만 보고 통째로 제외해버리게 된다. "N원당 M포인트/
+ * 마일리지" 사이에 "대한항공"처럼 브랜드명이 끼는 실제 표현(예: "3,000원당 1 대한항공
+ * 마일리지 적립")도 인식하도록 단위어 앞에 짧은 수식어를 허용한다. `NON_SPENDING_MARKERS`
+ * 게이트 전용 판정이며, 대상 row(라운지/메탈 플레이트/발급 수수료/발레파킹) 범위 밖에서는
+ * 쓰지 않는다.
+ */
+const SPENDING_REWARD_SIGNAL =
+  /\d+(?:\.\d+)?%|\d+[,\d]*\s*원\s*(?:할인|적립|캐시백)|\d+[,\d]*\s*원당\s*\d+\s*[가-힣A-Za-z]{0,10}\s*(?:마일|포인트|마일리지)|포인트\s*적립|마일리지\s*적립|청구할인/;
+
 interface TierCapMatch {
   readonly thresholdWon: number;
   readonly capWon: number;
@@ -673,6 +714,25 @@ function processBenefitRow(
     return {
       benefit: { sourceBenefitOrder: benefitOrder, pieces: [] },
       wholeRowWarning: { code: "NEW_MEMBER_EVENT", message: "기간 한정 신규회원 이벤트로 범위 밖 처리", provenance },
+      tierThresholds: [],
+    };
+  }
+
+  // 라운지/메탈 플레이트/발급 수수료/발레파킹처럼 소비 카테고리 기반 혜택이 아닌 것으로
+  // 확인된 마커가 있고, 이 row 어디에도 소비 연동 혜택 신호가 전혀 없는 경우만 범위
+  // 밖으로 둔다. 마커가 있어도 소비 혜택 신호가 함께 있으면(예: "라운지 + 5% 할인",
+  // "발레파킹 + 청구할인") 제외하지 않고 기존처럼 spendingBenefit 파이프라인을 그대로
+  // 통과시킨다 — 이런 row를 perk/spending으로 정확히 나누려면 별도의 segmentation이
+  // 필요하고, 이번 범위가 아니다(위 `NON_SPENDING_MARKERS`/`SPENDING_REWARD_SIGNAL` 참고).
+  if (hasNonSpendingMarker(summary, fullBenefitText) && !SPENDING_REWARD_SIGNAL.test(`${summary}\n${fullBenefitText}`)) {
+    const provenance = provenanceFor(fullBenefitText.slice(0, 200), null, fullBenefitText);
+    return {
+      benefit: { sourceBenefitOrder: benefitOrder, pieces: [] },
+      wholeRowWarning: {
+        code: "NON_SPENDING_ROW",
+        message: "라운지/메탈 플레이트/발급 수수료/발레파킹 등 소비 연동 혜택이 아닌 것으로 확인되어 범위 밖 처리",
+        provenance,
+      },
       tierThresholds: [],
     };
   }
