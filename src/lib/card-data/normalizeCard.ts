@@ -357,6 +357,41 @@ interface RowProcessingResult {
   readonly tierThresholds: readonly { readonly thresholdWon: number; readonly provenance: NormalizationProvenance }[];
 }
 
+/**
+ * "수수료"/환율 우대 관련 marker. `detectReward()`의 퍼센트 매칭이 소비 reward가 아니라
+ * 수수료 면제·환율 우대율을 오인식하지 않도록 쓴다(예: "해외 이용 수수료 100% 할인" →
+ * 실제로는 해외 결제 시 부과되는 수수료 자체의 면제이지 소비금액 100% 할인이 아니다).
+ *
+ * 전체 443-card 데이터셋의 `benefitSummary`에 등장하는 모든 `%`를 전수 조사한 결과,
+ * 이 marker들은 항상 같은 `"|"` clause 안에서 `%` 수치와 붙어 등장했다(다른 clause에
+ * 걸쳐 우연히 함께 나타난 사례는 없었다) — 그래서 marker 존재 여부를 clause 단위로
+ * 판단하면 충분하다.
+ */
+const FEE_OR_FX_CLAUSE_MARKERS = ["수수료", "환율 우대", "환율우대", "환전 우대", "환전우대"];
+
+/**
+ * `summary`를 `"|"` 기준 clause로 나눠, `matchIndex`(`summary` 안에서의 위치)가 속한
+ * clause에 `FEE_OR_FX_CLAUSE_MARKERS` 중 하나가 있는지만 확인한다.
+ *
+ * 검사 대상은 이 clause 하나뿐이다 — 다른 clause에 marker가 있다고 해서 차단하지 않고
+ * (예: "해외 최대 2% 혜택 | ... | 해외 이용 수수료 1.3% 청구 할인"에서 앞쪽 "2%" clause는
+ * marker가 없으므로 그대로 채택된다), `summary` 밖의 description(`lines`)은 아예 보지
+ * 않는다 — description의 "해외 이용 시 별도의 수수료 부과" 같은 유의사항 문구 때문에
+ * 정상적인 summary % reward가 오탐 차단되는 일이 없도록 하기 위함이다.
+ */
+function isPercentageInFeeOrFxClause(summary: string, matchIndex: number): boolean {
+  const clauses = summary.split("|");
+  let offset = 0;
+  for (const clause of clauses) {
+    const clauseEnd = offset + clause.length;
+    if (matchIndex >= offset && matchIndex < clauseEnd) {
+      return FEE_OR_FX_CLAUSE_MARKERS.some((marker) => clause.includes(marker));
+    }
+    offset = clauseEnd + 1; // "|" 구분자 한 글자만큼 건너뛴다.
+  }
+  return false;
+}
+
 function detectReward(
   summary: string,
   lines: readonly string[],
@@ -381,7 +416,11 @@ function detectReward(
   const percentMatch = /(\d+)(?:\.(\d{1,2}))?%/.exec(summary);
   const hasDiscountWord = summary.includes("할인");
   const hasCashbackWord = summary.includes("캐시백");
-  if (percentMatch && (hasDiscountWord || hasCashbackWord)) {
+  // 첫 번째 percentage candidate라는 기존 선택 기준 자체는 바꾸지 않는다 — 그 candidate가
+  // 속한 clause가 수수료/환율 우대 문맥이면 이번 candidate를 채택하지 않고(다음 candidate를
+  // 찾으러 가지 않고) 그대로 아래 fixed-amount 검사 → fallback(unverified)으로 넘어간다.
+  const isFeeOrFxPercentage = percentMatch !== null && isPercentageInFeeOrFxClause(summary, percentMatch.index);
+  if (percentMatch && !isFeeOrFxPercentage && (hasDiscountWord || hasCashbackWord)) {
     const wholePercent = Number(percentMatch[1]);
     const fractionDigits = (percentMatch[2] ?? "").padEnd(2, "0");
     const fractionBps = Number(fractionDigits);
