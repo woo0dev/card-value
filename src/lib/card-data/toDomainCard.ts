@@ -58,17 +58,14 @@ import type {
  * - `ANNUAL_FEE_UNVERIFIED`: `NormalizedCard.annualFee`가 `parsed`가 아님.
  * - `SOURCE_URL_MISSING`: `CardIdentity.sourceUrl`이 `null`. Domain `CardSource.sourceUrl`은
  *   `string`(non-null)이라 빈 문자열이나 임의 URL로 채울 수 없다.
- * - `CARD_TYPE_UNKNOWN`: `Card.cardType`은 `"credit" | "check"` 중 하나가 필수이고 "모름"
- *   상태가 없는데, 현재 CSV에는 이를 판단할 컬럼이 전혀 없고 `NormalizedCard`에도 대응하는
- *   필드가 없다. 그래서 이 사유는 이번 단계에서 **모든 카드에 대해 항상** 발생한다 —
- *   버그가 아니라, cardType 정보원이 아직 없다는 사실을 그대로 반영한 것이다. 다른 데이터
- *   소스가 추가되거나 Domain `CardType`이 "모름" 상태를 표현할 수 있게 바뀌기 전까지는
- *   `toDomainCard()`가 `success`를 반환할 수 없다.
+ *
+ * `cardType`은 실패 사유가 아니다. 현재 CSV에는 credit/check를 판단할 컬럼이 전혀 없지만,
+ * Domain `CardType`이 `"unknown"` 상태를 표현할 수 있으므로(`types/card.ts` 참고) 판별
+ * 근거가 없다는 사실 자체를 `cardType: "unknown"`으로 그대로 옮기고 `Card` 생성은 막지 않는다.
  */
 export type ToDomainCardFailureReason =
   | { readonly code: "ANNUAL_FEE_UNVERIFIED" }
-  | { readonly code: "SOURCE_URL_MISSING" }
-  | { readonly code: "CARD_TYPE_UNKNOWN" };
+  | { readonly code: "SOURCE_URL_MISSING" };
 
 export type ToDomainCardResult =
   | { readonly status: "success"; readonly card: Card }
@@ -302,8 +299,10 @@ function perkFieldEntries(
  *   재사용) — `unverifiedConditions`에도 넣지 않는다. `unsupported`는 "이 카드를 못 믿음"이
  *   아니라 "이 조건은 아직 계산 범위 밖"이라는 뜻이기 때문이다.
  * - `unsupported`는 없지만 unverified 필드가 있는 piece는 `unverifiedConditions`에 기록한다.
- * - `annualFee`가 `parsed`가 아니거나 `sourceUrl`이 `null`이거나 `cardType`을 결정할 수 없으면
- *   `Card`를 만들지 않고 `failed`를 반환한다. 어떤 필드도 임의 값으로 채우지 않는다.
+ * - `annualFee`가 `parsed`가 아니거나 `sourceUrl`이 `null`이면 `Card`를 만들지 않고 `failed`를
+ *   반환한다. `cardType`은 판별 근거가 없어도 `Card` 생성을 막지 않는다 — `"unknown"`으로
+ *   명시적으로 남긴다(`ToDomainCardFailureReason` 문서 참고). 어떤 필드도 임의 값으로
+ *   채우지 않는다.
  */
 export function toDomainCard(normalized: NormalizedCard): ToDomainCardResult {
   // `NormalizedCard.card`는 현재 `normalizeCard()` 구현상 항상 parsed다(§ CardIdentity 문서).
@@ -318,8 +317,9 @@ export function toDomainCard(normalized: NormalizedCard): ToDomainCardResult {
     reasons.push({ code: "SOURCE_URL_MISSING" });
   }
   // cardType: CSV에도 NormalizedCard에도 이 값을 판단할 근거가 전혀 없다. 추정하거나
-  // 기본값을 넣지 않으므로, 이번 단계에서는 이 사유가 모든 카드에 대해 항상 발생한다.
-  reasons.push({ code: "CARD_TYPE_UNKNOWN" });
+  // 임의 기본값(예: "credit")을 넣지 않고, 판별 근거가 없다는 사실 자체를 아래
+  // `cardType: "unknown"`으로 명시적으로 옮긴다 — 이 사실은 Card 생성을 막을 이유가
+  // 아니므로 failure reason에는 추가하지 않는다.
 
   if (reasons.length > 0) {
     return {
@@ -328,8 +328,6 @@ export function toDomainCard(normalized: NormalizedCard): ToDomainCardResult {
     };
   }
 
-  // 아래는 위 실패 사유가 전부 해소된 뒤에만(현재는 cardType 때문에 도달하지 않는다)
-  // 실행되는, 완전히 구현된 성공 경로다.
   const annualFee = unwrapParsed(normalized.annualFee);
   // 위에서 SOURCE_URL_MISSING이 없었을 때만 여기 도달하므로 null일 수 없다 — TypeScript가
   // 그 사실을 이 지점까지 이어서 알 수는 없으므로 명시적으로 좁힌다(조용히 캐스팅하지 않는다).
@@ -366,8 +364,12 @@ export function toDomainCard(normalized: NormalizedCard): ToDomainCardResult {
         // 이미 남아 있으므로 여기서 추가로 기록하지 않는다.
         continue;
       }
+      // 이 piece는 fully parsed가 아니라서 spendingBenefits/perks에 들어가지 않았다 —
+      // 즉 piece.benefitId는 Domain에 존재하지 않는 id다. 존재하지 않는 benefit을
+      // 가리키는 참조를 만들지 않기 위해 benefitId를 null로 남긴다(`UnverifiedCondition`
+      // 문서 참고 — non-null은 실제 spendingBenefits/perks에 있는 benefit만 가리킨다).
       for (const field of collectUnverifiedCoreFields(piece)) {
-        unverifiedConditions.push({ field, benefitId: asBenefitId(piece.benefitId) });
+        unverifiedConditions.push({ field, benefitId: null });
       }
     }
   }
@@ -382,12 +384,10 @@ export function toDomainCard(normalized: NormalizedCard): ToDomainCardResult {
     id: asCardId(cardIdentity.cardAdId),
     issuer: cardIdentity.issuerName,
     name: cardIdentity.cardName,
-    // 이 라인에는 절대 도달하지 않는다 — 위에서 CARD_TYPE_UNKNOWN을 항상 실패 사유로
-    // 반환하기 때문이다. TypeScript가 `cardType`이 필수임을 강제하므로, 이 함수가
-    // 완전해지려면 어떤 값이든 있어야 한다. 실제로 Domain에 이 값을 채워 넣는 것은
-    // 금지되어 있으므로, 이 함수는 절대 실행되지 않을 것으로 의도된 아래 한 줄에서
-    // 일부러 throw해 "성공 경로가 완성되지 않았다"는 사실을 숨기지 않는다.
-    cardType: unreachableCardType(),
+    // 현재 CSV/NormalizedCard 어디에도 credit/check를 판단할 근거가 없다. 추정하지
+    // 않고, 판별 근거가 없다는 사실 그대로 "unknown"을 쓴다(`types/card.ts`의
+    // `CardType` 문서 참고 — 임의의 기본값이 아니라 명시적인 "모름" 상태다).
+    cardType: "unknown",
     annualFee,
     performanceTiers: buildPerformanceTiers(normalized.performanceTiers),
     // performanceExcludedCategories: 이번 정규화 파이프라인은 이 정보를 전혀 읽지 않는다
@@ -404,15 +404,4 @@ export function toDomainCard(normalized: NormalizedCard): ToDomainCardResult {
   };
 
   return { status: "success", card };
-}
-
-/**
- * 실제로 호출되지 않는다 — `toDomainCard()`가 `cardType`을 항상 실패 사유로 반환하기
- * 때문이다. `Card.cardType`이 필수 필드라 TypeScript가 값을 요구하므로, 값을 지어내는
- * 대신 이 지점이 도달 불가능함을 명시적으로 표시한다.
- */
-function unreachableCardType(): never {
-  throw new Error(
-    "toDomainCard: cardType을 결정할 수 없는 카드는 success를 반환하지 않아야 한다(도달 불가능해야 하는 경로)",
-  );
 }

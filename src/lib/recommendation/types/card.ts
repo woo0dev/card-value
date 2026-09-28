@@ -10,7 +10,13 @@ import type {
 
 export type CardId = Brand<string, "CardId">;
 
-export type CardType = "credit" | "check";
+/**
+ * `"unknown"`은 임의의 기본값이 아니다 — 현재 데이터로 credit/check 여부를 판별할
+ * 근거가 없다는 사실을 명시적으로 표현하는 상태다. credit/check를 확인할 수 있는
+ * 데이터가 생기면 그때 실제 값으로 채운다. `"unknown"`이라고 해서 "credit으로
+ * 간주해도 됨" 같은 암묵적 의미를 가지지 않는다.
+ */
+export type CardType = "credit" | "check" | "unknown";
 
 export interface AnnualFee {
   amount: Won;
@@ -35,7 +41,17 @@ export type CoreConditionField =
   | "minSpend"
   | "pointValuation";
 
-/** 검증되지 않은 핵심 조건. `benefitId`가 `null`이면 카드 전체 조건이다. */
+/**
+ * 검증되지 않은 핵심 조건.
+ *
+ * - `benefitId`가 `null`인 경우 둘 중 하나다: (1) `annualFee`처럼 애초에 특정 benefit에
+ *   속하지 않는 카드 전체 조건이거나, (2) 원문/정규화 단계의 특정 piece에서 비롯된
+ *   조건이지만 그 piece가 fully parsed되지 않아 Domain `spendingBenefits`/`perks`로
+ *   만들어지지 않은 경우다. 두 경우 모두 "가리킬 실제 benefit이 없다"는 점은 같다.
+ * - `benefitId`가 `null`이 아니면 반드시 같은 `Card`의 `spendingBenefits[].id` 또는
+ *   `perks[].id`에 실제로 존재하는 benefit만 가리킨다 (`validateCard()`가 이 참조를
+ *   검증한다). 존재하지 않는 piece를 가리키는 값을 넣지 않는다.
+ */
 export interface UnverifiedCondition {
   field: CoreConditionField;
   benefitId: BenefitId | null;
