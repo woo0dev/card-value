@@ -784,6 +784,30 @@ function processBenefitRow(
     };
   }
 
+  // "▶"는 이 데이터셋에서 하나의 개별 sub-benefit 설명을 시작하는 불릿 마커로 쓰인다
+  // (예: "▶ 해외 2% 결제일할인", "▶ 국내 가맹점 0.7% 결제일할인"). 이 마커가 같은 row
+  // 안에 2개 이상 있으면, 그 row는 서로 다른 sub-benefit(대상/요율이 각각 다를 수 있는)이
+  // 함께 서술된 composite row일 가능성이 있다. 그런데 `detectTarget()`/`detectReward()`는
+  // row당 정확히 하나의 target/reward만 찾도록 설계돼 있어(§ 각 함수 문서 참고), composite
+  // row라도 두 함수가 서로 다른 sub-benefit에서 값을 가져와 실제로는 원문에 없는 조합을
+  // 만들 위험이 있다(예: target은 "해외" sub-benefit에서, reward는 다른 sub-benefit에서
+  // 매칭되는 경우). 이걸 sub-benefit 단위로 정확히 분해하는 것은 이번 범위가 아니므로
+  // (새로운 segmentation parser가 필요하다), 안전하게 이 row 전체를 범위 밖으로 두고
+  // 계산에 반영하지 않는다 — 혜택을 놓치는 것이 잘못된 조합을 계산하는 것보다 낫다.
+  const compositeMarkerCount = (fullBenefitText.match(/▶/g) ?? []).length;
+  if (compositeMarkerCount >= 2) {
+    const provenance = provenanceFor(fullBenefitText.slice(0, 200), null, fullBenefitText);
+    return {
+      benefit: { sourceBenefitOrder: benefitOrder, pieces: [] },
+      wholeRowWarning: {
+        code: "COMPOSITE_ROW",
+        message: `"▶" 마커가 ${compositeMarkerCount}개 발견되어 서로 다른 sub-benefit이 섞인 composite row일 가능성이 있어 범위 밖 처리`,
+        provenance,
+      },
+      tierThresholds: [],
+    };
+  }
+
   const pieceProvenanceFor = (conditionText: string): NormalizationProvenance =>
     provenanceFor(conditionText, 0, fullBenefitText);
 
