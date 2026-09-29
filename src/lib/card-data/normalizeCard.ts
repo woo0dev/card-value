@@ -486,6 +486,95 @@ function isDomesticOverseasCombination(text: string): boolean {
   return /국내/.test(text) && /해외/.test(text) && /합산|통합/.test(text);
 }
 
+/**
+ * "전체/전/모든 가맹점"류 표현. 이 자체는 국내+해외를 통틀어 21개 `SpendingCategory`
+ * 전체를 가리키는 명확한 신호다 — 아래 두 함정만 제외하면 그대로 `allExcept: []`로
+ * 옮길 수 있다(443장 실측 조사, `card_ad_id` 예시는 각 함수 문서 참고).
+ */
+const UNIVERSAL_SCOPE_PHRASE = /전체\s*가맹점|전\s*가맹점|모든\s*가맹점|가맹점\s*전체/;
+
+/**
+ * "모든 가맹점은 현대카드/BC카드/신한카드/우리카드... 가맹점 등록 및 업종 분류 기준"류는
+ * 이 혜택의 대상 범위를 말하는 게 아니라 "가맹점이 어떻게 분류되는지"를 설명하는 카드사
+ * 공통 안내 문구다. `card_ad_id=10322`(현대카드ZERO Edition3(할인형))의 "대중교통 업종
+ * 0.8% 청구 할인"(명백히 카테고리 한정 혜택)의 description에도 그대로 따라붙는 것을 실제
+ * CSV에서 확인했다 — 이 문구가 있는 줄은 범용 신호로 보지 않는다.
+ */
+function isMerchantClassificationDisclaimer(line: string): boolean {
+  return (
+    UNIVERSAL_SCOPE_PHRASE.test(line) &&
+    line.includes("기준") &&
+    (line.includes("등록") || line.includes("분류"))
+  );
+}
+
+/**
+ * "해외 전 가맹점"/"해외 모든 가맹점"처럼 `UNIVERSAL_SCOPE_PHRASE` 바로 앞에 "해외"가
+ * 오면 "해외 전체"(overseas 카테고리 하나)를 뜻하지 "국내+해외 전체"를 뜻하지 않는다
+ * (`card_ad_id=10219` zgm.휴가중카드 "해외 전가맹점", `card_ad_id=10372` JADE First
+ * "해외 : 해외 전 가맹점"에서 확인). 이 경우는 아래 기존 "해외" 단독 분기가 이미 정확히
+ * `categories: ["overseas"]`로 처리하므로 여기서 범용으로 승격시키지 않는다.
+ *
+ * 단, 같은 줄에 "국내"도 함께 있으면 "해외"가 바로 앞에 와도 "해외 단독"이 아니라
+ * "국내+해외 결합"(범용)이다 — `card_ad_id=10346`(zgm point카드)의 "국내/해외 전
+ * 가맹점에서 NH포인트 0.8%~1.8% 적립"에서 실제로 확인했다: "전 가맹점" 바로 앞의
+ * "해외"만 보면 해외 단독처럼 보이지만, 같은 줄의 "국내"가 이게 결합 표현임을 말해준다.
+ */
+function isOverseasOnlyPhrase(line: string, matchIndex: number): boolean {
+  const precedingText = line.slice(Math.max(0, matchIndex - 3), matchIndex);
+  if (!precedingText.includes("해외")) return false;
+  return !line.includes("국내");
+}
+
+/**
+ * 이 줄이 실제로 리워드(적립/할인/캐시백/마일리지/포인트)를 말하고 있는지. "모든 가맹점"이
+ * 있어도 리워드와 무관한 다른 조건(예: 무이자할부 대상 안내)을 말하는 줄이면 이 혜택의
+ * 대상 범위와 상관없다 — `card_ad_id=10540`의 "전국 모든 가맹점 2~3개월 상시 무이자할부"
+ * 에서 실제로 확인했다(이 줄은 별개 항목인 무이자할부 조건을 설명할 뿐, 같은 row의 실제
+ * 리워드인 "해외 사용금액 10% 할인"과는 무관하다).
+ */
+const REWARD_INDICATOR = /[%％]|적립|할인|캐시백|마일리지|마일|포인트/;
+
+interface UniversalScopeMatch {
+  readonly line: string;
+  /** `allExcept.categories`에 그대로 쓸 값. 해외를 포함한다는 신호("해외"/"국내외")가
+   * 같은 줄에 없는데 "국내"만 명시돼 있으면, 이 혜택이 해외까지 포함한다고 임의로
+   * 확대 해석하지 않고 `["overseas"]`로 제외한다. */
+  readonly excludedCategories: readonly SpendingCategory[];
+}
+
+/**
+ * "국내 모든 가맹점"처럼 "국내"만 있고 같은 줄에 "해외"/"국내외"가 없으면, 이 혜택이
+ * 실제로는 국내 전용이고 해외는 제외될 수 있다 — `card_ad_id=10151`(신한카드 플리)의
+ * "할인 쿠폰 적용 가맹점은 국내 모든 가맹점에서..."에서 실제로 확인했다(같은 row에
+ * "※ 할인 쿠폰은 국내 이용 거래에 한하여 적용됩니다."라는 별도 문구로 해외 제외가
+ * 명시돼 있음). 반대로 `card_ad_id=10304`(디지로카 London)의 "국내 모든 가맹점 0.7%,
+ * 해외 모든 이용금액 0.7% 캐시백 지급"처럼 같은 줄에 "해외"가 있으면 국내+해외 모두를
+ * 뜻하므로 제외하지 않는다. "국내"가 아예 없으면(예: "모든 가맹점 1,000원당 1마일리지")
+ * 지역 제한 신호 자체가 없으므로 문언 그대로 전체로 본다.
+ */
+function resolveUniversalScopeExcludedCategories(line: string): readonly SpendingCategory[] {
+  const mentionsDomesticOnly = line.includes("국내") && !line.includes("국내외") && !line.includes("해외");
+  return mentionsDomesticOnly ? ["overseas"] : [];
+}
+
+/**
+ * `lines`를 줄 단위로 검사해 범용 대상을 말하는 줄을 찾는다. `benefit_descriptions_json`의
+ * 각 문단이 이미 독립된 문장 단위이므로, 긴 합쳐진 텍스트에서 문자 위치로 앞뒤 문맥을
+ * 추정하는 것보다 안전하다(위 함정들을 문단 하나 안에서만 판단한다).
+ */
+function findUniversalScopeMatch(lines: readonly string[]): UniversalScopeMatch | null {
+  for (const line of lines) {
+    const match = UNIVERSAL_SCOPE_PHRASE.exec(line);
+    if (!match) continue;
+    if (isMerchantClassificationDisclaimer(line)) continue;
+    if (isOverseasOnlyPhrase(line, match.index)) continue;
+    if (!REWARD_INDICATOR.test(line)) continue;
+    return { line, excludedCategories: resolveUniversalScopeExcludedCategories(line) };
+  }
+  return null;
+}
+
 function detectTarget(
   rawCategory: string | null,
   lines: readonly string[],
@@ -526,6 +615,29 @@ function detectTarget(
       unsupportedCode: code,
     };
   }
+
+  // 범용(전체/전/모든 가맹점) 대상 표현은 `isDomesticOverseasCombination()`보다 먼저
+  // 확인한다. 그 함수는 "국내"+"해외"+"합산"/"통합"이 텍스트 어디엔가 함께 있으면
+  // (실제로는 서로 무관한 문장에서 각각 등장한 경우까지 포함해) true를 반환하는 넓은
+  // 휴리스틱이라, "국내 모든 가맹점 0.7%, 해외 모든 이용금액 0.7% 캐시백"처럼 명확한
+  // 범용 대상 문장까지 `DOMESTIC_OVERSEAS_COMBINATION`으로 잘못 분류하는 것을 실제
+  // 데이터(`card_ad_id=10304` 디지로카 London, `10396` 트래블로그 PRESTIGE)에서 확인했다.
+  // `findUniversalScopeMatch()`은 위 함정들(안내 문구/해외 단독/리워드 무관 줄)을 이미
+  // 걸러내는 좁은 판정이므로, 여기서 먼저 확인해도 다른 카드의 `DOMESTIC_OVERSEAS_COMBINATION`
+  // 처리에는 영향이 없다(그 판정을 흔드는 "국내외"류 표현 자체가 이 조건에 걸리지 않는다).
+  const universalScopeMatch = findUniversalScopeMatch(lines);
+  if (universalScopeMatch !== null) {
+    return {
+      outcome: {
+        status: "parsed",
+        confidence: "exact",
+        value: { type: "allExcept", categories: universalScopeMatch.excludedCategories },
+        provenance: provenanceFor(`범용(전체/모든 가맹점) 대상: "${universalScopeMatch.line}"`),
+      },
+      unsupportedCode: null,
+    };
+  }
+
   if (isDomesticOverseasCombination(combinedText)) {
     const code: UnsupportedConditionCode = "DOMESTIC_OVERSEAS_COMBINATION";
     return {
