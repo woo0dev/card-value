@@ -13,15 +13,18 @@ import type {
   UnsupportedConditionCode,
 } from "./normalizeTypes";
 import { createBenefitId, createPerformanceTierId } from "./id";
-import type { BasisPoints, CategoryTarget, SpendingCategory, Won } from "../recommendation/types";
+import type { BasisPoints, CategoryTarget, RewardCurrency, SpendingCategory, Won } from "../recommendation/types";
 
 /**
  * `card_ad_id=1294`(KB국민 굿데이올림카드) 하나를 대상으로 실제로 동작하는 최소
  * normalization pipeline. 443장 전체를 지원하는 것이 목표가 아니다 — 이 카드의 실제
  * benefit 텍스트에서 확인되는, 아래 "지원 범위"에 해당하는 패턴만 처리하고, 그 밖의
- * 모든 것(건당 조건, 횟수 제한, 특정 가맹점, 국내/해외 조합, 신규회원 이벤트, 단위 기반
+ * 모든 것(건당 조건, 횟수 제한, 특정 가맹점, 국내/해외 조합, 신규회원 이벤트, 리터당 단위
  * 적립, 복잡한 tiered rate, shared cap 자동 추론 등)은 `unsupported`/`unverified`로
- * 남기며 절대 추측해서 채우지 않는다.
+ * 남기며 절대 추측해서 채우지 않는다. 예외적으로 "N원당 M마일/포인트" 엄격 패턴(포인트/
+ * 마일리지, `detectUnitBasedPointsOrMiles` 참고)만 원화 환산 없이 좁게 지원한다 — 브랜드가
+ * 수량보다 먼저 오는 어순, 소수 수량, "최대" 수식어, 한 row에 여러 rate가 섞인 경우,
+ * programName을 특정할 수 없는 경우는 여전히 `unverified`로 남긴다.
  *
  * `benefit_values_json`은 쓰지 않는다 — 배열 길이가 실적 구간 수와 무관함이 이미
  * 실측으로 확인되었다(예: 구간 2개인데 원소 10개). 실제 조건은 `benefit_descriptions_json`
@@ -392,6 +395,161 @@ function isPercentageInFeeOrFxClause(summary: string, matchIndex: number): boole
   return false;
 }
 
+/**
+ * "N원당 M마일/마일리지/포인트/P" 엄격 패턴. 수량(그룹2)은 "원당" 바로 뒤(공백만 허용)에,
+ * 단위어(그룹3)는 수량 바로 뒤(공백만 허용)에 와야만 매치된다 — 그 사이에 브랜드명이나
+ * "최대" 같은 수식어가 끼면 이 자리에서 매치가 실패한다(둘 다 실제 데이터에서 확인된
+ * 흔한 형태이지만 이번 범위에서 의도적으로 제외한다, `normalizeCard.test.ts` 참고).
+ * 수량이 `\d+`(소수점 없음)라 "1.5마일"류 소수 수량도 같은 이유로 자동 배제된다.
+ *
+ * 단위어 뒤에는 일부러 경계를 두지 않는다 — "마일리지적립"처럼 공백 없이 바로 다른
+ * 한글 단어가 붙는 실제 표현(card_ad_id=10601)이 있어, 경계를 두면 오히려 놓친다.
+ * 로마자 "P"만 예외로 `(?![A-Za-z0-9])` 경계를 둔다 — 한 글자라 뒤에 다른 로마자/숫자가
+ * 붙으면("5PM"/"5Plus") 완전히 다른 의미일 위험이 있기 때문이다.
+ */
+const UNIT_REWARD_RX = /([\d,]+)\s*원당\s*(\d+)\s*(마일리지|마일|포인트|P(?![A-Za-z0-9]))/g;
+
+/**
+ * `programName`으로 보지 않을 일반 명사 조각. "카드사용액 1,500원당 1마일" 같은 실제
+ * 표현에서 숫자 바로 앞의 공백 없는 한 단어("카드사용액")가 문법적으로는 `extractLeadingBrandName`의
+ * 단일-단어 조건을 통과하지만 실제로는 브랜드명이 아니다 — 이런 일반 명사를 걸러낸다.
+ */
+const NON_BRAND_TOKEN_MARKERS = /금액|가맹점|카드|이용|결제|실적|한도|기준|서비스|적립|할인|캐시백|소비/;
+
+/**
+ * 매치 시작 위치 바로 앞(같은 줄, 공백만 사이에 둘 수 있음)에 다른 어떤 단어도 섞이지 않은
+ * 순수 한 단어가 있을 때만 그 단어를 programName으로 본다 — "대한항공 1,500원당 1마일리지"는
+ * 인정하지만, "대한항공 마일리지 적립 서비스 | 1,500원당 1마일리지"처럼 사이에 다른 문구가
+ * 낀 경우나 "국내 이용금액 1,500원당 1마일리지"처럼 여러 단어가 앞에 있는 경우는 인정하지
+ * 않는다(같은 row의 다른 clause를 뒤져 억지로 결합하지 않는다는 원칙 그대로).
+ */
+function extractLeadingBrandName(line: string, matchStart: number): string | null {
+  const preceding = line.slice(0, matchStart).trimEnd();
+  if (preceding.length === 0) return null;
+  if (!/^[가-힣A-Za-z]{2,12}$/.test(preceding)) return null;
+  if (NON_BRAND_TOKEN_MARKERS.test(preceding)) return null;
+  return preceding;
+}
+
+interface UnitRewardCandidate {
+  readonly unitAmountWon: number;
+  readonly quantityPerUnit: number;
+  readonly currencyType: "points" | "miles";
+  readonly programName: string | null;
+  readonly matchedText: string;
+}
+
+/** `lines`(요약 포함, 호출자가 합쳐서 넘긴다)의 각 줄에서 `UNIT_REWARD_RX` 후보를 전부 모은다. */
+function findUnitRewardCandidates(lines: readonly string[]): readonly UnitRewardCandidate[] {
+  const candidates: UnitRewardCandidate[] = [];
+  for (const line of lines) {
+    UNIT_REWARD_RX.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = UNIT_REWARD_RX.exec(line)) !== null) {
+      const unitAmountWon = Number(m[1].replace(/,/g, ""));
+      const quantityPerUnit = Number(m[2]);
+      const unitWord = m[3];
+      if (!isNonNegativeSafeInteger(unitAmountWon) || unitAmountWon <= 0) continue;
+      if (!isNonNegativeSafeInteger(quantityPerUnit) || quantityPerUnit <= 0) continue;
+      const currencyType: "points" | "miles" = unitWord === "포인트" || unitWord === "P" ? "points" : "miles";
+      candidates.push({
+        unitAmountWon,
+        quantityPerUnit,
+        currencyType,
+        programName: extractLeadingBrandName(line, m.index),
+        matchedText: m[0],
+      });
+    }
+  }
+  return candidates;
+}
+
+/**
+ * "N원당 M마일/포인트" 엄격 패턴을 원화 환산 없이 `RewardUnit` 기반 `points`/`miles`
+ * `RewardCurrency`로 직접 만든다. 기존 won(퍼센트/월 정액) 경로와 완전히 분리된 별도
+ * 분기이며, 이 함수가 아무 후보도 찾지 못하면(`null` 반환) 기존 로직이 그대로 이어진다.
+ *
+ * `summary`만 보고 `lines`(description)는 보지 않는다 — 실제 443장 전수 회귀 검증에서
+ * card_ad_id=2676(신세계백화점 5% 전자할인쿠폰 카드)의 description에 이 row의 실제
+ * 혜택과 무관한 일반 안내 문장("신세계 그룹 이용 시 1,000원당 1 포인트가 적립됩니다")이
+ * 있어, `lines`까지 훑으면 이 문장이 진짜 혜택(summary의 "5% 전자할인쿠폰", 기존에 이미
+ * parsed였던 won 혜택)을 가로채 unverified로 되돌리는 회귀가 실제로 발생함을 확인했다.
+ * `summary`는 이 row의 headline reward만 담아 그런 무관한 안내문이 섞일 위험이 훨씬
+ * 낮다 — "기존 won parsing을 절대 깨지 않는다"는 안전 조건이 "lines까지 넓게 본다"는
+ * 이익보다 우선한다.
+ *
+ * 안전 조건(모두 실제 데이터로 확인됨, `normalizeCard.test.ts` 참고):
+ * - 서로 다른(금액/수량이 다른) 후보가 같은 row에 여러 개 있으면(예: 국내/해외 rate가
+ *   다른 card_ad_id=1312) 첫 번째 값만 고르지 않고 통째로 `unverified`로 남긴다 — target과
+ *   잘못 결합될 위험을 없애기 위함이다.
+ * - programName을 확실히 특정할 수 없으면(`extractLeadingBrandName`이 `null`) 추측하지
+ *   않고 `unverified(PROGRAM_NAME_NOT_FOUND)`로 남긴다.
+ * - `rateBps`는 points/miles에서 실제로 쓰이지 않는(계산 엔진이 참조하지 않는) 구조적으로만
+ *   필요한 필드라 `0`으로 채운다(`rewards.ts`의 `computeSpendingBenefitRewardQuantity` 참고).
+ */
+function detectUnitBasedPointsOrMiles(
+  summary: string,
+  provenanceFor: (conditionText: string) => NormalizationProvenance,
+): NormalizationOutcome<NormalizedReward> | null {
+  const candidates = findUnitRewardCandidates([summary]);
+  if (candidates.length === 0) return null;
+
+  const distinctCombos = new Set(
+    candidates.map((c) => `${c.currencyType}:${c.unitAmountWon}:${c.quantityPerUnit}`),
+  );
+  if (distinctCombos.size > 1) {
+    return {
+      status: "unverified",
+      reasonCode: "MULTIPLE_CONFLICTING_VALUES",
+      provenance: provenanceFor(
+        `서로 다른 단위 기반 적립 값이 한 row에 함께 있어 하나의 reward로 안전하게 표현할 수 없음: ${candidates
+          .map((c) => `"${c.matchedText}"`)
+          .join(" / ")}`,
+      ),
+    };
+  }
+
+  const first = candidates[0];
+  if (!first) return null;
+  const programName = candidates.map((c) => c.programName).find((n): n is string => n !== null) ?? null;
+  if (programName === null) {
+    return {
+      status: "unverified",
+      reasonCode: "PROGRAM_NAME_NOT_FOUND",
+      provenance: provenanceFor(
+        `단위 기반 적립 문구는 찾았으나 프로그램명을 명확히 특정할 수 없음: "${first.matchedText}"`,
+      ),
+    };
+  }
+
+  const p = provenanceFor(`"${first.matchedText}" (programName="${programName}")`);
+  const currency: RewardCurrency =
+    first.currencyType === "miles"
+      ? {
+          type: "miles",
+          programName,
+          valuation: null,
+          unit: { unitAmount: asWon(first.unitAmountWon), quantityPerUnit: first.quantityPerUnit },
+        }
+      : {
+          type: "points",
+          programName,
+          valuation: null,
+          unit: { unitAmount: asWon(first.unitAmountWon), quantityPerUnit: first.quantityPerUnit },
+        };
+
+  return {
+    status: "parsed",
+    confidence: "exact",
+    value: {
+      kind: "rate",
+      rateBps: { status: "parsed", value: asBasisPoints(0), confidence: "exact", provenance: p },
+      currency: { status: "parsed", value: currency, confidence: "exact", provenance: p },
+    },
+    provenance: p,
+  };
+}
+
 function detectReward(
   summary: string,
   lines: readonly string[],
@@ -407,6 +565,12 @@ function detectReward(
   if (/건당|1회\s*[\d,]+\s*원/.test(combinedText)) {
     return { status: "unsupported", code: "PER_TRANSACTION_MINIMUM", provenance: provenanceFor(combinedText) };
   }
+
+  // "N원당 M마일/포인트" 엄격 패턴은 won(퍼센트/월 정액) 시도보다 먼저 확인한다 — 이
+  // 패턴과 겹치는 기존 분기가 없어(퍼센트는 "%", 월 정액은 "매월/월+원+할인/캐시백" 필수)
+  // 순서를 바꿔도 기존 won 경로에는 영향이 없다.
+  const unitRewardOutcome = detectUnitBasedPointsOrMiles(summary, provenanceFor);
+  if (unitRewardOutcome !== null) return unitRewardOutcome;
 
   // 단순 퍼센트: "10% 할인", "1.5% 할인 캐시백"처럼 %와 할인/캐시백 단어가 함께 있는 경우.
   // 정수와 소수(최대 소수 둘째 자리, 즉 1bp=0.01% 단위)를 문자열 자릿수 계산으로 정확히
@@ -442,13 +606,12 @@ function detectReward(
     }
   }
 
-  // 포인트 적립("포인트 적립", "적립률" 등)은 `RewardCurrency`의 `points` variant로 표현할
-  // 개념 자체는 domain에 이미 있다. 하지만 이 variant는 `PointValuation`(원화 환산 계수 +
-  // 출처)을 필수로 요구하는데, 현재 CSV에는 포인트→원화 환산율이나 그 출처를 담은 컬럼이
-  // 전혀 없다. Domain Design Decision 10("임의의 1P=1원 가정을 기본값으로 사용하지
-  // 않는다")에 따라 이 값을 지어낼 수 없으므로, 이번 확장에서도 포인트 기반 reward는
-  // parsed로 만들지 않는다 — 아래 fallback을 그대로 통해 unverified(NO_NUMERIC_VALUE_FOUND)로
-  // 남는다. "포인트인지 원인지 불명확하면 추측하지 않는다"를 그대로 따른 것이다.
+  // "N원당 M마일/포인트" 엄격 패턴이 아닌 포인트/마일리지 표현(예: "적립률 1.5%", 브랜드가
+  // 수량보다 먼저 오는 어순, 소수 수량, 여러 clause가 섞인 경우)은 위 `detectUnitBasedPointsOrMiles`가
+  // 이미 `null`을 반환해 여기까지 왔다는 뜻이다. 이런 경우까지 값을 지어내진 않는다 —
+  // Domain Design Decision 10("임의의 1P=1원 가정을 기본값으로 사용하지 않는다")과
+  // "포인트인지 원인지 불명확하면 추측하지 않는다" 원칙 그대로, 아래 fallback을 통해
+  // unverified(NO_NUMERIC_VALUE_FOUND)로 남는다.
 
   // 명확한 월 정액: "매월 3,000원 캐시백" / "월 5,000원 할인"처럼 월 단위가 명시된 경우만.
   // "건당"/"1회" 문맥은 위에서 이미 걸러졌으므로 여기 도달했다면 월 단위로 본다.

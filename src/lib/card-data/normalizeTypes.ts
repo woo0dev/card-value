@@ -109,7 +109,14 @@ export type UnverifiedReasonCode =
   | "AMBIGUOUS_TIER_VALUE"
   | "AMBIGUOUS_CAP_VALUE"
   | "MULTIPLE_CONFLICTING_VALUES"
-  | "AMBIGUOUS_TARGET_CATEGORY";
+  | "AMBIGUOUS_TARGET_CATEGORY"
+  /**
+   * 단위 기반(포인트/마일리지) 적립 문구("N원당 M마일" 등)는 찾았지만, 그 프로그램명을
+   * 신뢰 있게 특정할 수 없는 경우. 리워드 단위어("마일리지"/"포인트"/"P") 자체를
+   * programName으로 쓰지 않으며, 여러 clause를 뒤져 억지로 결합하지도 않는다
+   * (`normalizeCard.ts`의 `detectUnitBasedPointsOrMiles` 참고).
+   */
+  | "PROGRAM_NAME_NOT_FOUND";
 
 /**
  * `unsupported`의 사유. 조건 자체는 이해했지만 현재 입력 모델(`MonthlySpending`)이나

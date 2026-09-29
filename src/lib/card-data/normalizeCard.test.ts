@@ -257,3 +257,160 @@ describe("normalizeCard() — 범용(전체/전/모든 가맹점) target 정규�
     });
   });
 });
+
+/**
+ * `detectReward()`에 추가한 "N원당 M마일/마일리지/포인트/P" 엄격 패턴(`detectUnitBasedPointsOrMiles`)을
+ * 검증한다. 지원 범위는 의도적으로 좁다 — 수량이 "원당" 바로 뒤에(공백만 허용) 오고, 단위어가
+ * 수량 바로 뒤에(공백만 허용) 오는 경우만 지원하며, 브랜드가 수량보다 먼저 오는 어순, 소수
+ * 수량, "최대" 수식어, 한 row에 여러 rate가 섞인 경우, programName을 특정할 수 없는 경우는
+ * 전부 `unverified`로 남는다(읽기 전용 분석 결과 §4/§5/§7 참고). 기존 won(퍼센트/월 정액)
+ * 경로는 별도 분기라 이 describe 블록의 어떤 케이스도 건드리지 않는다.
+ */
+describe("normalizeCard() — 단위 기반(포인트/마일리지) reward 정규화", () => {
+  it("A. 단순 마일 — programName이 줄 맨 앞에 명확하면 parsed", () => {
+    const piece = normalizeSingleSpendingPiece(
+      buildRawBenefit({
+        benefitCategory: "항공마일리지",
+        benefitSummary: "대한항공 1,500원당 1마일리지",
+        descriptionLines: ["대한항공 1,500원당 1마일리지 적립"],
+      }),
+    );
+    const reward = piece.kind === "spendingBenefit" ? piece.reward : null;
+    assert.equal(reward?.status, "parsed");
+    if (reward?.status !== "parsed" || reward.value.kind !== "rate") throw new Error("unreachable");
+    assert.equal(reward.value.currency.status, "parsed");
+    assert.deepEqual(reward.value.currency.status === "parsed" ? reward.value.currency.value : null, {
+      type: "miles",
+      programName: "대한항공",
+      valuation: null,
+      unit: { unitAmount: 1500, quantityPerUnit: 1 },
+    });
+  });
+
+  it("B. 단순 포인트 — 동일 모델로 포인트도 parsed", () => {
+    const piece = normalizeSingleSpendingPiece(
+      buildRawBenefit({
+        benefitCategory: "포인트/캐시백",
+        benefitSummary: "신세계 1,000원당 5포인트",
+        descriptionLines: ["신세계 1,000원당 5포인트 적립"],
+      }),
+    );
+    const reward = piece.kind === "spendingBenefit" ? piece.reward : null;
+    assert.equal(reward?.status, "parsed");
+    if (reward?.status !== "parsed" || reward.value.kind !== "rate") throw new Error("unreachable");
+    assert.deepEqual(reward.value.currency.status === "parsed" ? reward.value.currency.value : null, {
+      type: "points",
+      programName: "신세계",
+      valuation: null,
+      unit: { unitAmount: 1000, quantityPerUnit: 5 },
+    });
+  });
+
+  it("C. comma 없는 숫자도 동일하게 parsed", () => {
+    const piece = normalizeSingleSpendingPiece(
+      buildRawBenefit({
+        benefitCategory: "항공마일리지",
+        benefitSummary: "스카이패스 1500원당 1마일",
+        descriptionLines: ["스카이패스 1500원당 1마일 적립"],
+      }),
+    );
+    const reward = piece.kind === "spendingBenefit" ? piece.reward : null;
+    assert.equal(reward?.status, "parsed");
+    if (reward?.status !== "parsed" || reward.value.kind !== "rate") throw new Error("unreachable");
+    assert.deepEqual(reward.value.currency.status === "parsed" ? reward.value.currency.value : null, {
+      type: "miles",
+      programName: "스카이패스",
+      valuation: null,
+      unit: { unitAmount: 1500, quantityPerUnit: 1 },
+    });
+  });
+
+  it("D. 소수 quantity('1.5마일')는 parsed 금지 — RewardUnit.quantityPerUnit이 정수 모델이므로 변환하지 않는다", () => {
+    const piece = normalizeSingleSpendingPiece(
+      buildRawBenefit({
+        benefitCategory: "항공마일리지",
+        benefitSummary: "대한항공 1,500원당 1.5마일",
+        descriptionLines: ["대한항공 1,500원당 1.5마일 적립"],
+      }),
+    );
+    const reward = piece.kind === "spendingBenefit" ? piece.reward : null;
+    assert.notEqual(reward?.status, "parsed");
+  });
+
+  it("E. '최대' 수식어가 붙으면 고정 rate로 만들지 않는다 — parsed 금지", () => {
+    const piece = normalizeSingleSpendingPiece(
+      buildRawBenefit({
+        benefitCategory: "항공마일리지",
+        benefitSummary: "대한항공 1,500원당 최대 2마일",
+        descriptionLines: ["대한항공 1,500원당 최대 2마일 적립"],
+      }),
+    );
+    const reward = piece.kind === "spendingBenefit" ? piece.reward : null;
+    assert.notEqual(reward?.status, "parsed");
+  });
+
+  it("F. programName이 전혀 없으면 추측하지 않고 unverified(PROGRAM_NAME_NOT_FOUND)로 남긴다", () => {
+    const piece = normalizeSingleSpendingPiece(
+      buildRawBenefit({
+        benefitCategory: "항공마일리지",
+        benefitSummary: "국내 이용금액 1,500원당 1마일리지 적립",
+        descriptionLines: ["국내 이용금액 1,500원당 1마일리지 적립"],
+      }),
+    );
+    const reward = piece.kind === "spendingBenefit" ? piece.reward : null;
+    assert.equal(reward?.status, "unverified");
+    assert.equal(reward?.status === "unverified" ? reward.reasonCode : null, "PROGRAM_NAME_NOT_FOUND");
+  });
+
+  it("G. 브랜드가 수량보다 먼저 오는 어순('1,500원당 대한항공 1마일리지')은 이번 단계에서 parsed 금지", () => {
+    const piece = normalizeSingleSpendingPiece(
+      buildRawBenefit({
+        benefitCategory: "항공마일리지",
+        benefitSummary: "1,500원당 대한항공 1마일리지",
+        descriptionLines: ["1,500원당 대한항공 1마일리지 적립"],
+      }),
+    );
+    const reward = piece.kind === "spendingBenefit" ? piece.reward : null;
+    assert.notEqual(reward?.status, "parsed");
+  });
+
+  it("H. 다중 rate regression(card_ad_id=1312 KB국민 마일리지 가온카드 실제 원문) — 첫 번째 match를 선택하지 않고 unverified로 남기며, target=overseas와 잘못 결합되지 않는다", () => {
+    // 실제 CSV 원문 그대로: 한 row의 benefit_summary에 국내(1마일)/해외(2마일) 서로 다른
+    // unit rate가 "|"로 함께 있다. 이 row의 target은(별개 로직인 detectTarget()에 의해)
+    // "해외" 단독 언급 때문에 categories:["overseas"]로 이미 parsed된다 — reward가 첫
+    // 매치(국내 1마일)를 그대로 채택하면 "target=해외인데 amount=국내 1마일"이라는, 원문에
+    // 없는 조합이 만들어진다. reward 자체가 parsed가 되지 않아야 이 위험이 원천 차단된다.
+    const piece = normalizeSingleSpendingPiece(
+      buildRawBenefit({
+        benefitCategory: "항공마일리지",
+        benefitSummary: "국내가맹점 1,500원당 1마일 적립 | 해외가맹점 1,500원당 2마일 적립",
+        descriptionLines: [
+          "국내 가맹점 이용 시 일시불 및 할부 이용금액 1,500원 당 대한항공 1마일리지 적립",
+          "해외 이용 시(직구, 온라인 포함) 일시불 및 할부 이용금액 1,500원 당 대한항공 2마일리지 적립",
+        ],
+      }),
+    );
+    assert.equal(piece.kind, "spendingBenefit");
+    if (piece.kind !== "spendingBenefit") throw new Error("unreachable");
+
+    // target은 기존(수정하지 않은) detectTarget() 로직 그대로 overseas로 판정된다 —
+    // reward parser가 이 판정에 관여하거나 바꾸지 않았음을 함께 확인한다.
+    assert.equal(piece.target.status, "parsed");
+    assert.deepEqual(piece.target.status === "parsed" ? piece.target.value : null, {
+      type: "categories",
+      categories: ["overseas"],
+    });
+
+    // reward는 반드시 미적용(unverified)이어야 하며, 첫 매치(국내 1마일)를 골라선 안 된다.
+    assert.notEqual(piece.reward.status, "parsed");
+    assert.equal(piece.reward.status === "unverified" ? piece.reward.reasonCode : null, "MULTIPLE_CONFLICTING_VALUES");
+
+    // 이 piece는 target은 parsed, reward는 unverified이므로 전체 piece는 fully-parsed가
+    // 아니다 — 최종 domain SpendingBenefit이 만들어지지 않는 기존 파이프라인 동작(1단계 6번
+    // 원칙)과 일치한다.
+    const allParsed = [piece.name, piece.requiredTierId, piece.target, piece.minMonthlySpend, piece.reward, piece.limits, piece.sharedCapId].every(
+      (o) => o.status === "parsed",
+    );
+    assert.equal(allParsed, false);
+  });
+});
