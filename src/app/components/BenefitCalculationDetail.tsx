@@ -32,7 +32,7 @@ function describeBenefitHeadline(info: BenefitDisplayInfo | undefined): string |
   if (info.kind === "rate") {
     const percent = info.rateBps / 100;
     const percentText = Number.isInteger(percent) ? `${percent}%` : `${percent.toFixed(2)}%`;
-    if (info.currency.type === "points") return `${percentText} 적립 (${info.currency.programName})`;
+    if (info.currency.type !== "won") return `${percentText} 적립 (${info.currency.programName})`;
     return info.currency.form === "discount" ? `${percentText} 할인` : `${percentText} 캐시백`;
   }
   return null;

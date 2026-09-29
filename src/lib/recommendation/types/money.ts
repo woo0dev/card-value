@@ -13,3 +13,9 @@ export type Won = Brand<number, "Won">;
 
 /** 요율(basis point 정수). `500` = 5%, `1000` = 10%, `10000` = 100%. */
 export type BasisPoints = Brand<number, "BasisPoints">;
+
+/**
+ * 포인트/마일리지 적립 수량. 원화 환산 없이 프로그램 고유 단위 그대로의 개수다.
+ * 0 이상의 안전한 정수. 원화(`Won`)와 구조적으로 섞이지 않도록 별도 brand를 쓴다.
+ */
+export type RewardQuantity = Brand<number, "RewardQuantity">;

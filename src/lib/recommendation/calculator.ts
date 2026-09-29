@@ -8,8 +8,13 @@ import type {
   MonthlySpending,
   NotAppliedBenefitCalculation,
   NotAppliedReason,
+  NotAppliedRewardCalculation,
   PerformanceTier,
   PerformanceTierId,
+  RateBenefit,
+  RewardCalculation,
+  RewardProgramTotal,
+  RewardQuantity,
   SharedCap,
   SharedCapId,
   SharedCapTierLimit,
@@ -19,8 +24,8 @@ import type {
 import type { CardValueResult } from "./types/result";
 import type { ValidatedCard } from "./types/validation";
 import { evaluateCardEligibility, type SpendingBenefitEligibility } from "./eligibility";
-import { computeSpendingBenefitReward } from "./rewards";
-import { multiplyWon, subtractWon, sumWon } from "./rounding";
+import { computeSpendingBenefitReward, computeSpendingBenefitRewardQuantity } from "./rewards";
+import { multiplyWon, subtractWon, sumRewardQuantity, sumWon } from "./rounding";
 
 /**
  * `ValidatedCard` + `MonthlySpending` → 카드 1장의 `CardValueResult`.
@@ -43,11 +48,21 @@ import { multiplyWon, subtractWon, sumWon } from "./rounding";
  *   `POINT_VALUATION_UNVERIFIED`는 발동 조건이 코드에 정의돼 있지 않으므로 이번에 추가하지 않는다.
  *   `PREVIOUS_MONTH_PERFORMANCE_ASSUMED`는 `eligibility.performanceAssumed`가 참일 때만
  *   추가한다(`spending.previousMonth === null` — 전월 소비 미입력 시 최고 구간을 가정했다는 뜻).
+ * - 포인트/마일리지(`points`/`miles`) `rate` 혜택은 `isRewardQuantityBenefit`으로 다른 혜택과
+ *   완전히 분리해서 처리한다: `benefitCalculations`(원화 합산)와 SharedCap 배분에는 절대
+ *   들어가지 않고, `rewardCalculations`/`rewardsByProgram`에만 담긴다. 따라서 `monthlyBenefit`
+ *   / `netAnnualValue`는 원화 혜택만 반영하며 포인트/마일리지의 임의 환산값을 더하지 않는다.
  *
  * `SharedCap`, ranking, `index.ts` 오케스트레이션은 이 파일의 책임이 아니다.
  */
 
 const ZERO_WON = sumWon([]);
+const ZERO_REWARD_QUANTITY = sumRewardQuantity([]);
+
+/** `RateBenefit`이 포인트/마일리지(원화 환산 없이 수량으로 계산하는) 혜택인지 판별한다. */
+function isRewardQuantityBenefit(benefit: SpendingBenefit): benefit is RateBenefit {
+  return benefit.kind === "rate" && (benefit.currency.type === "points" || benefit.currency.type === "miles");
+}
 
 // ---------------------------------------------------------------------------
 // tier 조회 (eligibility.ts와 같은 패턴이지만, SharedCap.tierLimits 선택에 쓰이는 별도 복사본이다 —
@@ -128,6 +143,39 @@ function buildNotAppliedFromEligibility(
   };
 }
 
+/**
+ * `buildNotAppliedFromEligibility`의 포인트/마일리지 버전. `benefit`이 `points`/`miles`
+ * 혜택인 것은 호출자(`calculateCardValue`)가 `isRewardQuantityBenefit`으로 이미 확인했다고
+ * 가정하며, 아니면 즉시 실패한다(`rewards.ts`의 불변식 검사와 같은 이유).
+ */
+function buildNotAppliedRewardFromEligibility(
+  evaluation: Extract<SpendingBenefitEligibility, { status: "not_applied" }>,
+  benefit: RateBenefit,
+): NotAppliedRewardCalculation {
+  const { currency } = benefit;
+  if (currency.type !== "points" && currency.type !== "miles") {
+    throw new Error(
+      `calculator: 불변식 위반 — buildNotAppliedRewardFromEligibility()는 currency.type이 "points" ` +
+        `또는 "miles"인 rate 혜택만 받는다(benefitId="${benefit.id}", currency.type="${currency.type}").`,
+    );
+  }
+
+  const steps: CalculationStep[] = [
+    { code: "ELIGIBLE_SPEND_COMPUTED", eligibleSpend: evaluation.eligibleSpend },
+    evaluation.reason,
+  ];
+  return {
+    status: "not_applied",
+    benefitId: benefit.id,
+    currencyType: currency.type,
+    programName: currency.programName,
+    eligibleSpend: evaluation.eligibleSpend,
+    quantity: ZERO_REWARD_QUANTITY,
+    reason: evaluation.reason,
+    steps,
+  };
+}
+
 interface EligibleReward {
   benefit: SpendingBenefit;
   calculation: AppliedBenefitCalculation;
@@ -201,6 +249,43 @@ function allocateSharedCap(
   return results;
 }
 
+/**
+ * `RewardCalculation` 목록을 프로그램(`currencyType` + `programName`) 단위로 합산한다.
+ * 기본 적립 + 추가 적립처럼 같은 프로그램의 혜택이 여러 개여도 하나로 모여야 하므로,
+ * 카드에 등장한 순서가 아니라 프로그램 키 기준으로 그룹화한다. 순서는 결정적이도록
+ * 처음 등장한 순서를 유지한다(`card.spendingBenefits` 순회 순서 = `rewardCalculations` 순서).
+ */
+function buildRewardsByProgram(rewardCalculations: readonly RewardCalculation[]): readonly RewardProgramTotal[] {
+  const order: string[] = [];
+  const groups = new Map<
+    string,
+    { currencyType: "points" | "miles"; programName: string; quantities: RewardQuantity[] }
+  >();
+
+  // `monthlyBenefit`이 applied만 합산하는 것과 같은 이유로, not_applied(quantity 0)는
+  // 프로그램 합산에 포함하지 않는다 — 적용되지 않은 혜택이 있다고 빈 프로그램 항목을 만들지 않는다.
+  for (const calc of rewardCalculations) {
+    if (calc.status !== "applied") continue;
+    const key = `${calc.currencyType}|${calc.programName}`;
+    let group = groups.get(key);
+    if (!group) {
+      group = { currencyType: calc.currencyType, programName: calc.programName, quantities: [] };
+      groups.set(key, group);
+      order.push(key);
+    }
+    group.quantities.push(calc.quantity);
+  }
+
+  return order.map((key) => {
+    const group = groups.get(key)!;
+    return {
+      currencyType: group.currencyType,
+      programName: group.programName,
+      totalQuantity: sumRewardQuantity(group.quantities),
+    };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // 공개 API
 // ---------------------------------------------------------------------------
@@ -215,9 +300,21 @@ export function calculateCardValue(
   const sharedCapIndex = new Map<SharedCapId, SharedCap>(card.sharedCaps.map((cap) => [cap.id, cap]));
 
   const calculationsByBenefitId = new Map<BenefitId, BenefitCalculation>();
+  const rewardCalculationsByBenefitId = new Map<BenefitId, RewardCalculation>();
   const sharedCapGroups = new Map<SharedCapId, EligibleReward[]>();
 
   for (const evaluation of eligibility.spendingBenefits) {
+    if (isRewardQuantityBenefit(evaluation.benefit)) {
+      // 포인트/마일리지는 원화 합산(calculationsByBenefitId)이나 SharedCap 배분에 전혀
+      // 섞이지 않는다 — 별도 맵에 담아 아래에서 독립적으로 조립한다.
+      const rewardCalculation =
+        evaluation.status === "not_applied"
+          ? buildNotAppliedRewardFromEligibility(evaluation, evaluation.benefit)
+          : computeSpendingBenefitRewardQuantity(evaluation.benefit, evaluation.eligibleSpend);
+      rewardCalculationsByBenefitId.set(evaluation.benefit.id, rewardCalculation);
+      continue;
+    }
+
     if (evaluation.status === "not_applied") {
       calculationsByBenefitId.set(evaluation.benefit.id, buildNotAppliedFromEligibility(evaluation));
       continue;
@@ -250,13 +347,27 @@ export function calculateCardValue(
     }
   }
 
-  const benefitCalculations = card.spendingBenefits.map((benefit) => {
-    const calculation = calculationsByBenefitId.get(benefit.id);
-    if (!calculation) {
-      throw new Error(`calculator: 불변식 위반 — benefitId="${benefit.id}"에 대한 계산 결과가 없음.`);
-    }
-    return calculation;
-  });
+  const benefitCalculations = card.spendingBenefits
+    .filter((benefit) => !isRewardQuantityBenefit(benefit))
+    .map((benefit) => {
+      const calculation = calculationsByBenefitId.get(benefit.id);
+      if (!calculation) {
+        throw new Error(`calculator: 불변식 위반 — benefitId="${benefit.id}"에 대한 계산 결과가 없음.`);
+      }
+      return calculation;
+    });
+
+  const rewardCalculations = card.spendingBenefits
+    .filter(isRewardQuantityBenefit)
+    .map((benefit): RewardCalculation => {
+      const calculation = rewardCalculationsByBenefitId.get(benefit.id);
+      if (!calculation) {
+        throw new Error(`calculator: 불변식 위반 — benefitId="${benefit.id}"에 대한 reward 계산 결과가 없음.`);
+      }
+      return calculation;
+    });
+
+  const rewardsByProgram = buildRewardsByProgram(rewardCalculations);
 
   const monthlyBenefit = sumWon(
     benefitCalculations
@@ -298,6 +409,8 @@ export function calculateCardValue(
     firstYearOnlyPerkValue,
     benefitCalculations,
     perkCalculations: [],
+    rewardCalculations,
+    rewardsByProgram,
     warnings,
   };
 }

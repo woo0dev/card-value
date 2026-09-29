@@ -7,6 +7,8 @@ import type {
   CalculationAssumptions,
   CalculationWarning,
   PerkCalculation,
+  RewardCalculation,
+  RewardProgramTotal,
 } from "./calculation";
 import type { NonEmptyReadonlyArray, ValidationErrorCode } from "./validation";
 
@@ -33,6 +35,10 @@ export interface CardValueResult {
   firstYearOnlyPerkValue: Won;
   benefitCalculations: readonly BenefitCalculation[];
   perkCalculations: readonly PerkCalculation[];
+  /** 포인트/마일리지 혜택의 계산 결과. 원화 환산이 없으며 `netAnnualValue`에 포함되지 않는다. */
+  rewardCalculations: readonly RewardCalculation[];
+  /** `rewardCalculations`를 프로그램 단위로 합산한 결과. */
+  rewardsByProgram: readonly RewardProgramTotal[];
   warnings: readonly CalculationWarning[];
 }
 

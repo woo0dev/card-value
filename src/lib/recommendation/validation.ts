@@ -236,8 +236,12 @@ function validateTierReference(
   }
 }
 
+/**
+ * `points`/`miles` 통화 공통 검증. `valuation`은 `null`(원화 환산 없음)을 허용하며, 값이 있을
+ * 때만 내부 필드를 검사한다. `unit`("X원당 Y개")은 이번 범위에서 항상 필수다.
+ */
 function validatePointCurrency(
-  currency: { readonly programName: string; readonly valuation: unknown },
+  currency: { readonly programName: string; readonly valuation: unknown; readonly unit: unknown },
   path: ValidationPath,
   issues: ValidationIssue[],
 ): void {
@@ -246,19 +250,42 @@ function validatePointCurrency(
   }
 
   const valuation = currency.valuation;
-  if (!isObject(valuation)) {
-    issues.push(error("MISSING_FIELD", at(path, "valuation")));
+  if (valuation !== null) {
+    if (!isObject(valuation)) {
+      issues.push(error("MISSING_FIELD", at(path, "valuation")));
+    } else {
+      const valuationPath = at(path, "valuation", "wonPerThousandPoints");
+      const wonPerThousandPoints = valuation.wonPerThousandPoints;
+      if (!isSafeInt(wonPerThousandPoints)) {
+        issues.push(
+          error("NOT_SAFE_INTEGER", valuationPath, { value: contextValue(wonPerThousandPoints) }),
+        );
+      } else if (wonPerThousandPoints <= 0) {
+        issues.push(error("NOT_POSITIVE", valuationPath, { value: wonPerThousandPoints }));
+      }
+    }
+  }
+
+  const unit = currency.unit;
+  if (!isObject(unit)) {
+    issues.push(error("MISSING_FIELD", at(path, "unit")));
     return;
   }
 
-  const valuationPath = at(path, "valuation", "wonPerThousandPoints");
-  const wonPerThousandPoints = valuation.wonPerThousandPoints;
-  if (!isSafeInt(wonPerThousandPoints)) {
-    issues.push(
-      error("NOT_SAFE_INTEGER", valuationPath, { value: contextValue(wonPerThousandPoints) }),
-    );
-  } else if (wonPerThousandPoints <= 0) {
-    issues.push(error("NOT_POSITIVE", valuationPath, { value: wonPerThousandPoints }));
+  const unitAmountPath = at(path, "unit", "unitAmount");
+  const unitAmount = unit.unitAmount;
+  if (!isSafeInt(unitAmount)) {
+    issues.push(error("NOT_SAFE_INTEGER", unitAmountPath, { value: contextValue(unitAmount) }));
+  } else if (unitAmount <= 0) {
+    issues.push(error("NOT_POSITIVE", unitAmountPath, { value: unitAmount }));
+  }
+
+  const quantityPerUnitPath = at(path, "unit", "quantityPerUnit");
+  const quantityPerUnit = unit.quantityPerUnit;
+  if (!isSafeInt(quantityPerUnit)) {
+    issues.push(error("NOT_SAFE_INTEGER", quantityPerUnitPath, { value: contextValue(quantityPerUnit) }));
+  } else if (quantityPerUnit <= 0) {
+    issues.push(error("NOT_POSITIVE", quantityPerUnitPath, { value: quantityPerUnit }));
   }
 }
 
@@ -470,7 +497,7 @@ function collectCardIssues(card: Card, issues: ValidationIssue[]): void {
         const currency: unknown = benefit.currency;
         if (!isObject(currency)) {
           issues.push(error("MISSING_FIELD", at(path, "currency")));
-        } else if (benefit.currency.type === "points") {
+        } else if (benefit.currency.type === "points" || benefit.currency.type === "miles") {
           validatePointCurrency(benefit.currency, at(path, "currency"), issues);
         }
         break;

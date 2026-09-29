@@ -1,5 +1,5 @@
 import type { RoundingPolicy } from "./types/calculation";
-import type { BasisPoints, Won } from "./types/money";
+import type { BasisPoints, RewardQuantity, Won } from "./types/money";
 
 /**
  * `Won`을 만드는 계산 산술의 단일 진입점. 반올림 정책과 안전 정수 검사를 여기에서만 다룬다.
@@ -49,6 +49,25 @@ function mintWon(value: number | bigint, operation: string): Won {
 }
 
 /**
+ * 산술 결과를 `RewardQuantity`로 만드는 유일한 지점. `mintWon`과 같은 안전 정수 검사를 거친다.
+ */
+function mintRewardQuantity(value: number | bigint, operation: string): RewardQuantity {
+  let result: number;
+  if (typeof value === "bigint") {
+    if (value > MAX_SAFE_BIGINT || value < MIN_SAFE_BIGINT) {
+      throw new RangeError(`${operation}: result exceeds the safe integer range`);
+    }
+    result = Number(value);
+  } else {
+    result = value;
+  }
+  if (!Number.isSafeInteger(result)) {
+    throw new RangeError(`${operation}: result is not a safe integer`);
+  }
+  return (result + 0) as RewardQuantity;
+}
+
+/**
  * `floor(amount × bps / 10,000)`.
  * 곱셈과 나눗셈은 `BigInt`로 정확히 계산한다. `rate`(원화) 혜택과 부가 혜택 실현 비율에 사용한다.
  */
@@ -68,6 +87,19 @@ export function applyPointRateAsWon(
 ): Won {
   const product = BigInt(spend) * BigInt(rateBps) * BigInt(wonPerThousandPoints);
   return mintWon(product / POINT_RATE_DENOMINATOR, "applyPointRateAsWon");
+}
+
+/**
+ * `floor(amount / unitAmount) × quantityPerUnit`. "X원당 Y개"(`RewardUnit`) 기반 포인트/마일리지
+ * 수량을 비례식 근사 없이 정확히 계산하는 유일한 지점이다. `amount`/`unitAmount`가 0 이상이므로
+ * `BigInt` 나눗셈의 0 방향 절사가 내림과 같다(파일 상단 전제와 동일).
+ */
+export function applyUnitReward(amount: Won, unitAmount: Won, quantityPerUnit: number): RewardQuantity {
+  if (!Number.isSafeInteger(quantityPerUnit)) {
+    throw new RangeError("applyUnitReward: quantityPerUnit must be a safe integer");
+  }
+  const units = BigInt(amount) / BigInt(unitAmount);
+  return mintRewardQuantity(units * BigInt(quantityPerUnit), "applyUnitReward");
 }
 
 /**
@@ -91,6 +123,21 @@ export function sumWon(amounts: readonly Won[]): Won {
     }
   }
   return mintWon(total, "sumWon");
+}
+
+/**
+ * 포인트/마일리지 수량을 합산한다. 빈 배열은 0이다(동일 프로그램의 여러 혜택을 합칠 때 사용).
+ * 누적 도중 안전한 정수 범위를 벗어나도 `RangeError`를 던진다.
+ */
+export function sumRewardQuantity(quantities: readonly RewardQuantity[]): RewardQuantity {
+  let total = 0;
+  for (const quantity of quantities) {
+    total += quantity;
+    if (!Number.isSafeInteger(total)) {
+      throw new RangeError("sumRewardQuantity: running total exceeds the safe integer range");
+    }
+  }
+  return mintRewardQuantity(total, "sumRewardQuantity");
 }
 
 /** `minuend - subtrahend`. 음수 결과를 허용한다 (예: 연회비를 뺀 순혜택). */

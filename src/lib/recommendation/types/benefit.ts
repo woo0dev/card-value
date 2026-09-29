@@ -52,9 +52,23 @@ export interface PointValuation {
   verifiedAt: string | null;
 }
 
+/**
+ * "X원당 Y개" 형태의 정확한 수량 계산 단위 (예: 1,500원당 1마일 → `unitAmount:1500`,
+ * `quantityPerUnit:1`). 포인트/마일리지 수량은 이 `unitAmount`로 나눈 몫에 `quantityPerUnit`을
+ * 곱해 계산하며(`rounding.ts`의 `applyUnitReward`), 비례식(`rateBps`) 근사로 변환하지 않는다.
+ * "X% 적립"처럼 단위 문구가 없는 산정 방식은 이 구조로 표현하지 않는다(별도 deferred).
+ */
+export interface RewardUnit {
+  /** 이 금액마다 `quantityPerUnit`만큼 적립된다. 0보다 큰 안전한 정수. */
+  unitAmount: Won;
+  /** `unitAmount`당 적립되는 수량. 0보다 큰 안전한 정수. */
+  quantityPerUnit: number;
+}
+
 export type RewardCurrency =
   | { type: "won"; form: "discount" | "cashback" }
-  | { type: "points"; programName: string; valuation: PointValuation };
+  | { type: "points"; programName: string; valuation: PointValuation | null; unit: RewardUnit }
+  | { type: "miles"; programName: string; valuation: PointValuation | null; unit: RewardUnit };
 
 /** 혜택이 적용되는 소비 카테고리. 제외 카테고리는 `allExcept`로 표현한다. */
 export type CategoryTarget =

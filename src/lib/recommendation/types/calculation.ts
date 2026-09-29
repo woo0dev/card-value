@@ -1,4 +1,4 @@
-import type { BasisPoints, Won } from "./money";
+import type { BasisPoints, RewardQuantity, Won } from "./money";
 import type {
   BenefitId,
   ExclusiveGroupId,
@@ -37,6 +37,7 @@ export type CalculationProgressStep =
   | { code: "ELIGIBLE_SPEND_COMPUTED"; eligibleSpend: Won }
   | { code: "ELIGIBLE_SPEND_CAPPED"; cap: Won; before: Won; after: Won }
   | { code: "REWARD_COMPUTED"; rawAmount: Won }
+  | { code: "REWARD_QUANTITY_COMPUTED"; quantity: RewardQuantity }
   | { code: "BENEFIT_CAP_APPLIED"; cap: Won; before: Won; after: Won }
   | {
       code: "SHARED_CAP_APPLIED";
@@ -81,6 +82,44 @@ export interface NotAppliedBenefitCalculation extends BenefitCalculationBase {
 export type BenefitCalculation =
   | AppliedBenefitCalculation
   | NotAppliedBenefitCalculation;
+
+interface RewardCalculationBase {
+  benefitId: BenefitId;
+  currencyType: "points" | "miles";
+  programName: string;
+  eligibleSpend: Won;
+  /** 원화 환산 없이 적립된 수량. 미적용이면 0. */
+  quantity: RewardQuantity;
+  steps: readonly CalculationStep[];
+}
+
+export interface AppliedRewardCalculation extends RewardCalculationBase {
+  status: "applied";
+}
+
+export interface NotAppliedRewardCalculation extends RewardCalculationBase {
+  status: "not_applied";
+  /** 미적용 사유. `steps`의 마지막 단계와 일치한다. */
+  reason: NotAppliedReason;
+}
+
+/**
+ * 포인트/마일리지 혜택 1개의 계산 결과와 trace. `BenefitCalculation`과 구조를 의도적으로
+ * 대칭시키되, 원화 금액(`rawAmount`/`finalAmount`) 대신 원화 환산 없는 `quantity`를 담는다.
+ * `benefitCalculations`(원화 합산)와 절대 섞이지 않으며, `netAnnualValue` 계산에도 관여하지 않는다.
+ */
+export type RewardCalculation = AppliedRewardCalculation | NotAppliedRewardCalculation;
+
+/**
+ * 같은 프로그램(`currencyType` + `programName`)의 `RewardCalculation`을 합산한 결과.
+ * 기본 적립 + 추가 적립처럼 혜택이 여러 개로 나뉘어 있어도 프로그램 단위로 확인할 수 있도록
+ * 미리 집계해 둔다(`monthlyBenefit`이 `benefitCalculations`의 편의 합산인 것과 같은 위치).
+ */
+export interface RewardProgramTotal {
+  currencyType: "points" | "miles";
+  programName: string;
+  totalQuantity: RewardQuantity;
+}
 
 /** 부가 혜택 1개의 계산 trace. 일반 소비 혜택과 분리해서 표현한다. */
 export interface PerkCalculation {

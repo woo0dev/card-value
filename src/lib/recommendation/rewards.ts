@@ -1,12 +1,13 @@
 import type {
   AppliedBenefitCalculation,
+  AppliedRewardCalculation,
   CalculationStep,
   FixedBenefit,
   RateBenefit,
   SpendingBenefit,
   Won,
 } from "./types";
-import { applyBasisPoints, applyPointRateAsWon } from "./rounding";
+import { applyBasisPoints, applyUnitReward } from "./rounding";
 
 /**
  * 혜택 하나(`SpendingBenefit`)와 그 혜택에 이미 계산된 `eligibleSpend`를 받아 reward 금액을
@@ -39,21 +40,27 @@ function applyBenefitRewardCap(benefit: SpendingBenefit, rawAmount: Won, steps: 
 }
 
 /**
- * `rate` 혜택. 원화(`won`)면 `applyBasisPoints`, 포인트(`points`)면 `applyPointRateAsWon`으로
- * 요율과 포인트 환산을 한 번에(중간에 정수화하지 않고) 처리한다 — 둘 다 `rounding.ts`가
- * 제공하는 유일한 계산 지점이며, 여기서 직접 곱셈/나눗셈을 하지 않는다.
+ * `rate` 혜택 중 원화(`won`) 혜택의 금액을 `applyBasisPoints`로 계산한다.
+ * 포인트/마일리지(`points`/`miles`)는 원화 합산에 절대 섞지 않으므로(`benefitCalculations`는
+ * 원화 전용) 이 함수가 아니라 `computeSpendingBenefitRewardQuantity`가 계산하며, 호출자
+ * (`calculator.ts`)가 통화 종류로 미리 분기해 이 함수에는 원화 혜택만 넘긴다. 그럼에도
+ * 다른 통화가 들어오면 조용히 잘못된 원화 금액을 만드는 대신 즉시 실패한다.
  *
  * `monthlyEligibleSpendCap`은 소비 기준(`rate`)에서만 의미가 있으므로 여기서만 적용한다.
  */
 function computeRateBenefit(benefit: RateBenefit, eligibleSpend: Won): AppliedBenefitCalculation {
+  if (benefit.currency.type !== "won") {
+    throw new Error(
+      `rewards: 불변식 위반 — computeSpendingBenefitReward()는 currency.type이 "won"인 rate 혜택만 받는다` +
+        `(benefitId="${benefit.id}", currency.type="${benefit.currency.type}"). points/miles는 computeSpendingBenefitRewardQuantity()를 써야 한다.`,
+    );
+  }
+
   const steps: CalculationStep[] = [{ code: "ELIGIBLE_SPEND_COMPUTED", eligibleSpend }];
 
   const spendForReward = applyEligibleSpendCap(benefit, eligibleSpend, steps);
 
-  const rawAmount =
-    benefit.currency.type === "won"
-      ? applyBasisPoints(spendForReward, benefit.rateBps)
-      : applyPointRateAsWon(spendForReward, benefit.rateBps, benefit.currency.valuation.wonPerThousandPoints);
+  const rawAmount = applyBasisPoints(spendForReward, benefit.rateBps);
   steps.push({ code: "REWARD_COMPUTED", rawAmount });
 
   const finalAmount = applyBenefitRewardCap(benefit, rawAmount, steps);
@@ -90,4 +97,43 @@ function computeFixedBenefit(benefit: FixedBenefit, eligibleSpend: Won): Applied
  */
 export function computeSpendingBenefitReward(benefit: SpendingBenefit, eligibleSpend: Won): AppliedBenefitCalculation {
   return benefit.kind === "rate" ? computeRateBenefit(benefit, eligibleSpend) : computeFixedBenefit(benefit, eligibleSpend);
+}
+
+/**
+ * 포인트/마일리지(`points`/`miles`) `rate` 혜택의 적립 수량을 계산한다. `computeSpendingBenefitReward`와
+ * 마찬가지로 자격 판정은 이미 끝난 것으로 가정하며(`eligibility.ts` 책임), 여기서는 금액이 아니라
+ * `RewardUnit`(`currency.unit`) 기반 정확한 수량만 계산한다.
+ *
+ * 원화 환산(`currency.valuation`)은 이 함수가 다루지 않는다 — 결과는 항상 원화 환산 없는
+ * `quantity`다. `monthlyRewardCap`(원화 단위 한도)은 수량과 단위가 맞지 않아 적용하지 않는다
+ * (`monthlyEligibleSpendCap`은 원화 소비액 상한이므로 계산 전에는 그대로 적용한다).
+ */
+export function computeSpendingBenefitRewardQuantity(
+  benefit: RateBenefit,
+  eligibleSpend: Won,
+): AppliedRewardCalculation {
+  if (benefit.currency.type !== "points" && benefit.currency.type !== "miles") {
+    throw new Error(
+      `rewards: 불변식 위반 — computeSpendingBenefitRewardQuantity()는 currency.type이 "points" 또는 ` +
+        `"miles"인 rate 혜택만 받는다(benefitId="${benefit.id}", currency.type="${benefit.currency.type}").`,
+    );
+  }
+  const { currency } = benefit;
+
+  const steps: CalculationStep[] = [{ code: "ELIGIBLE_SPEND_COMPUTED", eligibleSpend }];
+
+  const spendForReward = applyEligibleSpendCap(benefit, eligibleSpend, steps);
+
+  const quantity = applyUnitReward(spendForReward, currency.unit.unitAmount, currency.unit.quantityPerUnit);
+  steps.push({ code: "REWARD_QUANTITY_COMPUTED", quantity });
+
+  return {
+    status: "applied",
+    benefitId: benefit.id,
+    currencyType: currency.type,
+    programName: currency.programName,
+    eligibleSpend,
+    quantity,
+    steps,
+  };
 }
