@@ -267,8 +267,10 @@ function validatePointCurrency(
 // ---------------------------------------------------------------------------
 
 /**
- * 소비 입력 검증. `previousMonth`/`currentMonth`가 모두 있어야 하고, 카테고리 금액은
- * 0 이상의 안전한 정수여야 하며, 알 수 없는 카테고리 키는 오류다. `{}`는 허용한다.
+ * 소비 입력 검증. `currentMonth`는 항상 있어야 하고, `previousMonth`는 객체이거나 `null`이어야
+ * 한다(`null` = 전월 소비 미입력 → 전월실적 조건 충족으로 간주, `eligibility.ts` 참고).
+ * 카테고리 금액은 0 이상의 안전한 정수여야 하며, 알 수 없는 카테고리 키는 오류다. `{}`는
+ * 허용한다(모든 카테고리 0원으로 실제 입력한 상태 — `null`과 다르다).
  * 환불 등 음수 소비는 지원하지 않는다.
  */
 export function validateMonthlySpending(
@@ -282,6 +284,7 @@ export function validateMonthlySpending(
   } else {
     for (const period of SPENDING_PERIODS) {
       const amounts = input[period];
+      if (period === "previousMonth" && amounts === null) continue;
       if (!isObject(amounts)) {
         issues.push(error("MISSING_FIELD", [period]));
         continue;

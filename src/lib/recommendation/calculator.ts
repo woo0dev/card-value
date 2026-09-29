@@ -41,6 +41,8 @@ import { multiplyWon, subtractWon, sumWon } from "./rounding";
  *   그대로 옮긴다. `FIRST_YEAR_FEE_WAIVED`는 `card.annualFee.firstYearWaived`가 참일 때만
  *   추가한다(연회비 차감 자체는 항상 `card.annualFee.amount` 전액으로 한다).
  *   `POINT_VALUATION_UNVERIFIED`는 발동 조건이 코드에 정의돼 있지 않으므로 이번에 추가하지 않는다.
+ *   `PREVIOUS_MONTH_PERFORMANCE_ASSUMED`는 `eligibility.performanceAssumed`가 참일 때만
+ *   추가한다(`spending.previousMonth === null` — 전월 소비 미입력 시 최고 구간을 가정했다는 뜻).
  *
  * `SharedCap`, ranking, `index.ts` 오케스트레이션은 이 파일의 책임이 아니다.
  */
@@ -280,6 +282,7 @@ export function calculateCardValue(
       }),
     ),
     ...(card.annualFee.firstYearWaived ? [{ code: "FIRST_YEAR_FEE_WAIVED" } as const] : []),
+    ...(eligibility.performanceAssumed ? [{ code: "PREVIOUS_MONTH_PERFORMANCE_ASSUMED" } as const] : []),
   ];
 
   return {

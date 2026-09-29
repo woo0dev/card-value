@@ -1,13 +1,12 @@
 import type {
   BenefitCalculation,
   CalculationStep,
-  CalculationWarning,
   CardValueResult,
   CategoryTarget,
   NotAppliedReason,
   PerkCalculation,
 } from "../../lib/recommendation/types";
-import { CATEGORY_LABELS, type BenefitDisplayInfo, type TierDisplayInfo } from "./SpendingForm";
+import { CATEGORY_LABELS, CAUTION_WARNING_CODES, type BenefitDisplayInfo, type TierDisplayInfo } from "./SpendingForm";
 import { formatWon } from "./RecommendationCard";
 
 interface BenefitCalculationDetailProps {
@@ -159,8 +158,6 @@ function describeFeeNoteWarning(): string {
   return "이 카드는 첫 해 연회비가 면제될 수 있어요. 위 금액은 연회비가 매년 전액 부과된다고 가정한 반복 기준이라, 첫 해 실제 순혜택은 이보다 클 수 있습니다.";
 }
 
-const CAUTION_WARNING_CODES = new Set<CalculationWarning["code"]>(["UNVERIFIED_CONDITION", "POINT_VALUATION_UNVERIFIED"]);
-
 /**
  * 선택된 카드 1장의 계산 상세. `CardValueResult`(+ `benefitInfo`/`tierInfo` 표시용 맵)에
  * 이미 있는 값만 그대로 보여준다 — 이 컴포넌트는 presentation layer이고, 금액이나 혜택을
@@ -178,19 +175,33 @@ export default function BenefitCalculationDetail({ result, benefitInfo, tierInfo
 
   const hasCaution = result.warnings.some((warning) => CAUTION_WARNING_CODES.has(warning.code));
   const hasFeeNote = result.warnings.some((warning) => warning.code === "FIRST_YEAR_FEE_WAIVED");
+  const hasAssumedPerformance = result.warnings.some(
+    (warning) => warning.code === "PREVIOUS_MONTH_PERFORMANCE_ASSUMED",
+  );
 
   return (
     <div className="space-y-5">
       <section>
         <h3 className="text-sm font-semibold text-gray-900">전월실적</h3>
-        <p className="mt-1 text-sm text-gray-600">지난달 사용액 {formatWon(result.previousMonthPerformance)}</p>
-        <p className="text-sm text-gray-600">
-          {result.achievedTierId === null
-            ? "적용되는 실적 구간이 없습니다."
-            : achievedTier
-              ? `적용 구간 ${achievedTier.name}`
-              : "적용 혜택 구간이 계산에 반영되었습니다."}
-        </p>
+        {hasAssumedPerformance ? (
+          // `achievedTierId`는 실제로는 카드의 최고 구간을 가정한 값이다(eligibility.ts) — 이를
+          // "실제 지난달 사용액"/"실제 달성한 구간"처럼 보여주면 사실과 다르게 보일 수 있어
+          // 그 대신 가정했다는 사실 자체를 명확히 알린다.
+          <p className="mt-1 text-sm text-gray-600">
+            전월 소비를 입력하지 않아 전월실적 조건을 충족한 것으로 가정하고 계산했어요.
+          </p>
+        ) : (
+          <>
+            <p className="mt-1 text-sm text-gray-600">지난달 사용액 {formatWon(result.previousMonthPerformance)}</p>
+            <p className="text-sm text-gray-600">
+              {result.achievedTierId === null
+                ? "적용되는 실적 구간이 없습니다."
+                : achievedTier
+                  ? `적용 구간 ${achievedTier.name}`
+                  : "적용 혜택 구간이 계산에 반영되었습니다."}
+            </p>
+          </>
+        )}
       </section>
 
       <section>

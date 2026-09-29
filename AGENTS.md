@@ -135,6 +135,12 @@ CardValue 추천 도메인의 설계 결정사항이다. 타입과 계산 로직
 
 4. **`MonthlySpending`은 `previousMonth`와 현재 월 소비 데이터를 명시적으로 분리한다.**
    - 계산 엔진은 전월실적을 현재 월 소비와 임의로 동일하다고 간주하지 않는다.
+   - `previousMonth`는 `null`을 허용한다. `null`은 "전월 소비를 아직 입력하지 않음"을 뜻하며,
+     이 경우 0원 소비로 간주해 전월실적 조건을 탈락시키지 않고 카드의 최고
+     `performanceTier`를 달성한 것으로 가정한다(`PREVIOUS_MONTH_PERFORMANCE_ASSUMED`
+     warning으로 남긴다). `{}`(빈 객체)는 "실제로 모든 카테고리에 0원을 입력함"을 뜻하는
+     별개의 상태이며, 이 경우는 실제 전월실적 판정 로직을 그대로 적용한다 — `null`과
+     `{}`를 같은 것으로 취급하지 않는다.
 
 5. **혜택 간 중복 및 통합 한도의 적용 순서는 결정적이어야 한다.**
    - `priority` 등의 데이터 필드로 순서를 명시한다.
@@ -222,8 +228,11 @@ src/lib/recommendation/
 - `Won`: 안전한 정수여야 한다. 소비액, 실적 하한, 혜택 금액, 한도, 연회비는 추가로 0 이상이어야 한다.
   한도는 `null`(한도 없음) 또는 안전한 정수이며 `0`은 한도 0이다. 결과의 `netAnnualValue`는 음수 가능하며 검증 대상이 아니다.
 - `BasisPoints`: 안전한 정수이며 음수 불가, 0은 허용한다. `rateBps`는 상한을 두지 않고 `realizationBps`는 `0...10000`이다.
-- `MonthlySpending`: `previousMonth`와 `currentMonth`가 모두 있어야 한다. `{}`는 허용하고, 존재하지 않는 category key는 error다.
-  음수(환불) 소비는 지원하지 않는다.
+- `MonthlySpending`: `currentMonth`는 항상 객체여야 한다. `previousMonth`는 객체이거나 `null`이어야
+  하며, `null`은 "전월 소비 미입력 → 전월실적 조건 충족으로 간주"를 뜻하는 유효한 상태이지
+  error가 아니다(Domain Design Decision 4 참고). 객체인 경우 `{}`는 허용하고(모든 카테고리
+  0원으로 실제 입력한 상태), 존재하지 않는 category key는 error다. 음수(환불) 소비는
+  지원하지 않는다.
 - `PerformanceTier`: 중복 `id`, 중복 `minPreviousMonthSpend`, 음수/비정수 threshold는 error다.
   배열 순서, `minPreviousMonthSpend = 0`, tier가 없는 카드는 허용한다.
 - `priority`: 유한한 수이면 된다. 음수, 소수, 중복을 허용하며 최종 tie-breaker는 benefit `id` 오름차순이다.

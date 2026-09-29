@@ -1,5 +1,5 @@
 import type { CardValueResult } from "../../lib/recommendation/types";
-import type { BenefitDisplayInfo, TierDisplayInfo } from "./SpendingForm";
+import { CAUTION_WARNING_CODES, type BenefitDisplayInfo, type TierDisplayInfo } from "./SpendingForm";
 import BenefitCalculationDetail from "./BenefitCalculationDetail";
 
 interface RecommendationCardProps {
@@ -25,7 +25,10 @@ export function formatWon(amount: number): string {
  * `netAnnualValue`가 음수여도 숨기거나 0으로 보정하지 않는다 — 순혜택이 음수인 것도
  * recommendation domain이 유효한 결과로 취급하는 상태다(AGENTS.md Domain Decision 13).
  * warnings는 code를 그대로 노출하지 않고 존재 여부만 사용자 친화적 문구로 보여준다
- * (사용자용 문구는 UI 계층에서 만든다 — Domain Decision 12).
+ * (사용자용 문구는 UI 계층에서 만든다 — Domain Decision 12). "일부 조건 확인 필요" 배지는
+ * warning이 하나라도 있으면이 아니라 `CAUTION_WARNING_CODES`(실제 확인이 필요한 warning만)에
+ * 해당하는 것이 있을 때만 뜬다 — `FIRST_YEAR_FEE_WAIVED`나 `PREVIOUS_MONTH_PERFORMANCE_ASSUMED`
+ * 처럼 단순 안내/계산 가정 warning으로는 뜨지 않는다(`BenefitCalculationDetail.tsx` 참고).
  */
 export default function RecommendationCard({
   rank,
@@ -36,7 +39,7 @@ export default function RecommendationCard({
   expanded,
   onToggleExpanded,
 }: RecommendationCardProps) {
-  const hasWarnings = result.warnings.length > 0;
+  const hasWarnings = result.warnings.some((warning) => CAUTION_WARNING_CODES.has(warning.code));
 
   return (
     <div className="rounded-2xl border border-gray-200 bg-white p-5">

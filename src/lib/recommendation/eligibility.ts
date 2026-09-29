@@ -61,6 +61,10 @@ export interface CardEligibility {
   readonly previousMonthPerformance: Won;
   readonly spendingBenefits: readonly SpendingBenefitEligibility[];
   readonly perks: readonly PerkEligibility[];
+  /** `spending.previousMonth === null`(전월 소비 미입력)이라 실적 조건을 충족한 것으로
+   * 가정했는지. `calculator.ts`가 이 값을 보고 `PREVIOUS_MONTH_PERFORMANCE_ASSUMED`
+   * warning을 붙인다. */
+  readonly performanceAssumed: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -153,6 +157,27 @@ function computeAchievedTierId(
     }
   }
   return achieved?.id ?? null;
+}
+
+/**
+ * 전월 소비 미입력(`previousMonth === null`) 시 "전월실적 조건을 충족한 것으로 가정"하기
+ * 위해 쓰는 구간 — 카드가 가진 `performanceTiers` 중 `minPreviousMonthSpend`가 가장 큰
+ * 구간이다(배열 순서에 의존하지 않는다). 카드에 tier가 없으면(`[]`) `null`을 반환하며,
+ * 이는 원래도 tier 조건이 없는 카드이므로 동작에 차이가 없다.
+ *
+ * 이 값을 `achievedTierId`로 그대로 쓰면 `meetsRequiredTier`/`resolveExclusiveGroups`/
+ * `calculator.ts`의 `SharedCap` 해석 등 achievedTierId를 소비하는 기존 로직을 전혀
+ * 수정하지 않고도 모든 실적 조건이 충족된 것처럼 동작한다 — 가짜 값이 아니라 카드에
+ * 실재하는 tier id를 그대로 쓰는 것이므로 이후 tier 이름 조회 등도 깨지지 않는다.
+ */
+function computeHighestTierId(tiers: readonly PerformanceTier[]): PerformanceTierId | null {
+  let highest: PerformanceTier | null = null;
+  for (const tier of tiers) {
+    if (highest === null || tier.minPreviousMonthSpend > highest.minPreviousMonthSpend) {
+      highest = tier;
+    }
+  }
+  return highest?.id ?? null;
 }
 
 // ---------------------------------------------------------------------------
@@ -306,11 +331,17 @@ function evaluatePerk(
 
 export function evaluateCardEligibility(card: ValidatedCard, spending: MonthlySpending): CardEligibility {
   const tierIndex = buildTierIndex(card.performanceTiers);
-  const previousMonthPerformance = computePreviousMonthPerformance(
-    spending.previousMonth,
-    card.performanceExcludedCategories,
-  );
-  const achievedTierId = computeAchievedTierId(card.performanceTiers, previousMonthPerformance);
+
+  // `previousMonth === null`이면 전월 소비를 아직 입력하지 않은 것이다 — 0원 소비로 간주해
+  // 실적 조건을 탈락시키지 않고, 카드의 최고 구간을 달성한 것으로 가정한다(spending.ts 문서 참고).
+  const previousMonth = spending.previousMonth;
+  const performanceAssumed = previousMonth === null;
+  const previousMonthPerformance = previousMonth === null
+    ? ZERO_WON
+    : computePreviousMonthPerformance(previousMonth, card.performanceExcludedCategories);
+  const achievedTierId = previousMonth === null
+    ? computeHighestTierId(card.performanceTiers)
+    : computeAchievedTierId(card.performanceTiers, previousMonthPerformance);
 
   const individuallyEvaluated = card.spendingBenefits.map((benefit) =>
     evaluateSpendingBenefit(benefit, achievedTierId, previousMonthPerformance, spending.currentMonth, tierIndex),
@@ -319,5 +350,5 @@ export function evaluateCardEligibility(card: ValidatedCard, spending: MonthlySp
 
   const perks = card.perks.map((perk) => evaluatePerk(perk, achievedTierId, previousMonthPerformance, tierIndex));
 
-  return { achievedTierId, previousMonthPerformance, spendingBenefits, perks };
+  return { achievedTierId, previousMonthPerformance, spendingBenefits, perks, performanceAssumed };
 }

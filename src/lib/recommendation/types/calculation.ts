@@ -116,4 +116,5 @@ export interface CalculationAssumptions {
 export type CalculationWarning =
   | { code: "UNVERIFIED_CONDITION"; field: CoreConditionField; benefitId: BenefitId | null }
   | { code: "FIRST_YEAR_FEE_WAIVED" }
-  | { code: "POINT_VALUATION_UNVERIFIED"; benefitId: BenefitId };
+  | { code: "POINT_VALUATION_UNVERIFIED"; benefitId: BenefitId }
+  | { code: "PREVIOUS_MONTH_PERFORMANCE_ASSUMED" };

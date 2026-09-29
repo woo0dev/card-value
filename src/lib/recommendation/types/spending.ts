@@ -16,8 +16,14 @@ export type CategorySpending = Readonly<Partial<Record<SpendingCategory, Won>>>;
  * - 결제수단별 조건 (간편결제, 신용/체크 등)
  * - 특정 가맹점 조건
  * - 국내/해외 구분 (`category.ts`의 `overseas` 참고)
+ *
+ * `previousMonth`는 `null`을 명시적으로 허용한다: "전월 소비를 아직 입력하지 않음"을 뜻하며,
+ * 이 경우 계산 엔진은 전월실적을 0원으로 간주해 조건 미충족 처리하지 않고, 대신 카드의
+ * 최고 `performanceTier`를 달성한 것으로 가정해 전월실적 조건을 충족한 것으로 계산한다
+ * (`eligibility.ts` 참고). `{}`(빈 객체)는 "입력했지만 모든 카테고리가 0원"이라는 뜻으로,
+ * `null`과 명확히 다른 상태다 — 이 경우는 실제 전월실적 판정 로직을 그대로 적용한다.
  */
 export interface MonthlySpending {
-  previousMonth: CategorySpending;
+  previousMonth: CategorySpending | null;
   currentMonth: CategorySpending;
 }

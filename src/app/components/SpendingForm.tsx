@@ -4,6 +4,7 @@ import { useState, type FormEvent } from "react";
 import { SPENDING_CATEGORIES } from "../../lib/recommendation/types";
 import type {
   CalculationAssumptions,
+  CalculationWarning,
   CategoryTarget,
   ExcludedCard,
   MonthlySpending,
@@ -27,6 +28,18 @@ export interface TierDisplayInfo {
   readonly name: string;
   readonly minPreviousMonthSpend: number;
 }
+
+/**
+ * "사용자가 실제로 확인해야 하는" warning만 caution으로 취급한다. `FIRST_YEAR_FEE_WAIVED`(단순
+ * 안내)와 `PREVIOUS_MONTH_PERFORMANCE_ASSUMED`(전월 소비 미입력 시 자동으로 붙는 계산 가정
+ * 안내일 뿐 미검증 조건이 아님)는 여기 포함하지 않는다. `RecommendationCard.tsx`의 목록 단계
+ * "일부 조건 확인 필요" 배지와 `BenefitCalculationDetail.tsx`의 상세 caution 박스가 이 정의를
+ * 그대로 공유해 기준을 하나로 유지한다(두 컴포넌트가 서로를 import하지 않도록 이 파일에 둔다).
+ */
+export const CAUTION_WARNING_CODES = new Set<CalculationWarning["code"]>([
+  "UNVERIFIED_CONDITION",
+  "POINT_VALUATION_UNVERIFIED",
+]);
 
 /**
  * `/api/recommendations`의 실제 응답 모양. `RecommendationResult`(input/ranked/excluded/
@@ -236,12 +249,19 @@ export default function SpendingForm({ onResult, onError }: SpendingFormProps) {
 
     setStatus("loading");
 
+    // 지난달 소비에 채워진 카테고리가 하나도 없으면(펼치지 않았거나, 펼쳤어도 전부 빈 값)
+    // "미입력"으로 보고 previousMonth를 null로 보낸다 — 전월실적 조건을 충족한 것으로
+    // 가정해달라는 신호다(recommendation/types/spending.ts 참고). 사용자가 카테고리 중
+    // 하나라도 실제로 값을 입력했다면(0원 입력 포함) previous.spending 객체를 그대로
+    // 보낸다 — "0원으로 입력함"과 "미입력"은 서로 다른 상태이므로 여기서 임의로 합치지 않는다.
+    const previousMonth = Object.keys(previous.spending).length === 0 ? null : previous.spending;
+
     try {
       const response = await fetch("/api/recommendations", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          spending: { previousMonth: previous.spending, currentMonth: current.spending },
+          spending: { previousMonth, currentMonth: current.spending },
           assumptions: ASSUMPTIONS,
         }),
       });
