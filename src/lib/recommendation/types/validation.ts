@@ -23,6 +23,10 @@ export type ValidationErrorCode =
   | "EMPTY_STRING"
   | "MISSING_FIELD"
   | "UNKNOWN_SPENDING_CATEGORY"
+  /** 정해진 문자열 집합(예: `CalculationAssumptions.roundingPolicy`/`perkValuation`) 중
+   * 어느 것과도 일치하지 않는 값. `UNKNOWN_SPENDING_CATEGORY`와 같은 종류의 문제이지만
+   * 카테고리 전용이 아닌 일반적인 경우를 위한 code다. */
+  | "INVALID_ENUM_VALUE"
   // 유일성
   | "DUPLICATE_TIER_ID"
   | "DUPLICATE_TIER_THRESHOLD"

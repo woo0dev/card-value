@@ -1,5 +1,6 @@
 import { SPENDING_CATEGORIES } from "./types/category";
 import type { Card } from "./types/card";
+import type { CalculationAssumptions } from "./types/calculation";
 import type { MonthlySpending } from "./types/spending";
 import type {
   ValidatedCard,
@@ -331,6 +332,68 @@ export function validateMonthlySpending(
   const { errors, warnings } = splitIssues(issues);
   if (hasIssues(errors)) return { valid: false, errors, warnings };
   return { valid: true, value: spending, warnings };
+}
+
+// ---------------------------------------------------------------------------
+// CalculationAssumptions
+// ---------------------------------------------------------------------------
+
+const KNOWN_ROUNDING_POLICIES: ReadonlySet<string> = new Set(["floor_per_benefit"]);
+const KNOWN_PERK_VALUATION_POLICIES: ReadonlySet<string> = new Set([
+  "exclude_perks",
+  "user_selected_realization",
+]);
+
+/**
+ * 추천 계산 가정 검증. 계산 로직 중 실제로 읽는 값은 `annualizationMonths`뿐이지만
+ * (`calculator.ts`의 `multiplyWon(monthlyBenefit, assumptions.annualizationMonths)`),
+ * `roundingPolicy`/`perkValuation`도 결과(`RecommendationResult.assumptions`)에 그대로
+ * 기록되는 값이라 다른 필드와 동일하게 구조/값을 검증한다 — "계산에 쓰이는 값만 검증한다"로
+ * 범위를 좁히지 않는다.
+ *
+ * `annualizationMonths`는 안전한 정수여야 한다(`multiplyWon`이 `Number.isSafeInteger`를
+ * 요구하며, 어기면 `RangeError`를 던진다 — 검증 없이 통과시키면 여기서 예외가 난다). 추가로
+ * 1~12 범위로 제한한다: "월 혜택을 연간으로 환산할 때 곱하는 개월 수"라는 타입 문서 그대로의
+ * 의미상 1년은 12개월을 넘을 수 없다는 전제이며, 이 범위 자체는 기존 AGENTS.md나 타입에
+ * 명시된 스펙이 아니라 이번에 새로 정한 것이다.
+ */
+export function validateCalculationAssumptions(
+  assumptions: unknown,
+): ValidationResult<CalculationAssumptions> {
+  const issues: ValidationIssue[] = [];
+
+  if (!isObject(assumptions)) {
+    issues.push(error("MISSING_FIELD", []));
+  } else {
+    const roundingPolicy = assumptions.roundingPolicy;
+    if (roundingPolicy === undefined) {
+      issues.push(error("MISSING_FIELD", ["roundingPolicy"]));
+    } else if (typeof roundingPolicy !== "string" || !KNOWN_ROUNDING_POLICIES.has(roundingPolicy)) {
+      issues.push(error("INVALID_ENUM_VALUE", ["roundingPolicy"], { value: contextValue(roundingPolicy) }));
+    }
+
+    const annualizationMonths = assumptions.annualizationMonths;
+    if (annualizationMonths === undefined) {
+      issues.push(error("MISSING_FIELD", ["annualizationMonths"]));
+    } else if (!isSafeInt(annualizationMonths)) {
+      issues.push(
+        error("NOT_SAFE_INTEGER", ["annualizationMonths"], { value: contextValue(annualizationMonths) }),
+      );
+    } else if (annualizationMonths < 1 || annualizationMonths > 12) {
+      issues.push(error("OUT_OF_RANGE", ["annualizationMonths"], { value: annualizationMonths }));
+    }
+
+    const perkValuation = assumptions.perkValuation;
+    if (perkValuation === undefined) {
+      issues.push(error("MISSING_FIELD", ["perkValuation"]));
+    } else if (typeof perkValuation !== "string" || !KNOWN_PERK_VALUATION_POLICIES.has(perkValuation)) {
+      issues.push(error("INVALID_ENUM_VALUE", ["perkValuation"], { value: contextValue(perkValuation) }));
+    }
+  }
+
+  const { errors, warnings } = splitIssues(issues);
+  if (hasIssues(errors)) return { valid: false, errors, warnings };
+  return { valid: true, value: assumptions as CalculationAssumptions, warnings };
 }
 
 // ---------------------------------------------------------------------------

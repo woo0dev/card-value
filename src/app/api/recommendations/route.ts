@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { recommendCards } from "../../../lib/recommendation";
-import { validateMonthlySpending } from "../../../lib/recommendation/validation";
-import type { CalculationAssumptions } from "../../../lib/recommendation/types/calculation";
+import { validateCalculationAssumptions, validateMonthlySpending } from "../../../lib/recommendation/validation";
 import type { MonthlySpending } from "../../../lib/recommendation/types/spending";
 import type { Card, CategoryTarget, RewardCurrency } from "../../../lib/recommendation/types";
 import { DbQueryError, loadCards } from "../../../lib/db/loadCards";
@@ -10,12 +9,16 @@ import { DbMapperError } from "../../../lib/db/mapper";
 /**
  * POST /api/recommendations
  *
- * 처리 순서: request body → JSON parse → validateMonthlySpending() → loadCards() →
- * recommendCards(cards, spending, assumptions) → JSON response.
+ * 처리 순서: request body → JSON parse → validateMonthlySpending() + validateCalculationAssumptions()
+ * (둘 다 통과해야 loadCards()를 호출한다) → loadCards() → recommendCards(cards, spending,
+ * assumptions) → JSON response.
  *
- * `CalculationAssumptions`는 이 파일이 기본값을 만들지 않는다 — body.assumptions를 그대로
- * `recommendCards()`에 전달한다(recommendation/index.ts 자체가 이미 "assumptions를 대신
- * 만들지 않는다"고 선언하고 있고, 이 API도 그 원칙을 그대로 따른다).
+ * `CalculationAssumptions`는 이 파일이 기본값을 만들지 않는다 — body.assumptions를 검증만
+ * 거쳐 그대로 `recommendCards()`에 전달한다(recommendation/index.ts 자체가 이미 "assumptions를
+ * 대신 만들지 않는다"고 선언하고 있고, 이 API도 그 원칙을 그대로 따른다). 검증 없이 타입
+ * 캐스팅만 하면 `assumptions`가 없거나 구조가 잘못됐을 때 `calculator.ts`의
+ * `multiplyWon()`에서 런타임 예외가 나 500으로 이어진다 — `spending`과 동일하게
+ * `validateCalculationAssumptions()`로 막아 400으로 응답한다.
  *
  * service role key는 `loadCards()` 내부(`src/lib/db/client.ts`)에서만 쓰이고, 이 파일이나
  * 응답/로그에 직접 등장하지 않는다.
@@ -60,6 +63,15 @@ export async function POST(request: Request): Promise<NextResponse> {
     return NextResponse.json(spendingValidation, { status: 400 });
   }
 
+  // spending과 같은 이유·같은 방식으로 검증한다: assumptions가 없거나 형태가 잘못돼도
+  // (undefined, null, 필드 누락/타입 불일치/범위 초과 포함) 스스로 MISSING_FIELD 등의
+  // ValidationIssue로 보고한다. DB 조회(loadCards()) 전에 두 입력을 모두 검증해, 어차피
+  // 실패할 요청 때문에 불필요한 DB 조회가 일어나지 않게 한다.
+  const assumptionsValidation = validateCalculationAssumptions(assumptions);
+  if (!assumptionsValidation.valid) {
+    return NextResponse.json(assumptionsValidation, { status: 400 });
+  }
+
   let cards: readonly Card[];
   try {
     cards = await loadCards();
@@ -76,7 +88,7 @@ export async function POST(request: Request): Promise<NextResponse> {
   }
 
   try {
-    const result = recommendCards(cards, spendingValidation.value, assumptions as CalculationAssumptions);
+    const result = recommendCards(cards, spendingValidation.value, assumptionsValidation.value);
 
     // RecommendationResult(input/ranked/excluded/assumptions)는 그대로 반환한다 — 축약하거나
     // 새 response schema로 감싸지 않는다. ranked가 빈 배열이거나 excluded에 카드가 있어도
