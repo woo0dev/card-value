@@ -572,6 +572,38 @@ function detectReward(
   const unitRewardOutcome = detectUnitBasedPointsOrMiles(summary, provenanceFor);
   if (unitRewardOutcome !== null) return unitRewardOutcome;
 
+  // "국내 X% ... 해외 Y%"처럼 summary 하나에 국내/해외가 함께 등장하고 서로 다른 할인율이
+  // 섞여 있으면, 뒤의 percentMatch가 그중 하나(첫 번째 후보)만 집어 다른 쪽을 조용히
+  // 누락시킬 위험이 있다 — 실제로 card_ad_id=10707(삼성 iD 해외 3.5 카드)의 "해외 가맹점
+  // 3.5% 할인 | 국내 가맹점 0.7% 할인"에서 국내 0.7%가 그렇게 유실되는 것을 실측으로
+  // 확인했다. 두 지역이 같은 요율이면(예: "국내 0.7%, 해외 0.7%") 정보 손실이 없으므로
+  // 막지 않는다 — summary 안의 서로 다른 값이 2개 이상일 때만 안전하게 unverified로
+  // 남긴다(이미 있는 `MULTIPLE_CONFLICTING_VALUES` reason code를 그대로 재사용한다, 새
+  // 코드를 추가하지 않는다). 수수료/환율우대 clause의 %는 후보에서 제외한다(기존
+  // `isPercentageInFeeOrFxClause`와 동일 기준). lines(설명문)까지는 보지 않는다 — summary
+  // 밖의 무관한 문장이 끼어들 위험을 피하기 위해 `detectUnitBasedPointsOrMiles`와 같은
+  // 이유로 범위를 summary로 좁힌다.
+  if (summary.includes("국내") && summary.includes("해외")) {
+    const distinctRateBps = new Set<number>();
+    const allPercentRx = /(\d+)(?:\.(\d{1,2}))?%/g;
+    let percentCandidate: RegExpExecArray | null;
+    while ((percentCandidate = allPercentRx.exec(summary)) !== null) {
+      if (isPercentageInFeeOrFxClause(summary, percentCandidate.index)) continue;
+      const whole = Number(percentCandidate[1]);
+      const fraction = Number((percentCandidate[2] ?? "").padEnd(2, "0"));
+      distinctRateBps.add(whole * 100 + fraction);
+    }
+    if (distinctRateBps.size >= 2) {
+      return {
+        status: "unverified",
+        reasonCode: "MULTIPLE_CONFLICTING_VALUES",
+        provenance: provenanceFor(
+          `국내/해외에 서로 다른 할인율이 함께 있어 하나의 reward로 안전하게 확정할 수 없음: "${summary}"`,
+        ),
+      };
+    }
+  }
+
   // 단순 퍼센트: "10% 할인", "1.5% 할인 캐시백"처럼 %와 할인/캐시백 단어가 함께 있는 경우.
   // 정수와 소수(최대 소수 둘째 자리, 즉 1bp=0.01% 단위)를 문자열 자릿수 계산으로 정확히
   // basis point 정수로 바꾼다 — `Number("1.5") * 100`처럼 부동소수점 곱셈을 쓰지 않는다.

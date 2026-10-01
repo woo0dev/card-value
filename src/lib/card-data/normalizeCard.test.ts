@@ -414,3 +414,105 @@ describe("normalizeCard() — 단위 기반(포인트/마일리지) reward 정�
     assert.equal(allParsed, false);
   });
 });
+
+/**
+ * `detectReward()`의 won 퍼센트 경로가 "국내 X% / 해외 Y%"처럼 summary 하나에 서로 다른
+ * 대상·요율이 함께 있을 때 첫 번째 숫자만 집어 잘못된 단일 혜택으로 확정하지 않는지
+ * 검증한다. 실측: card_ad_id=10707(삼성 iD 해외 3.5 카드)의 "해외 가맹점 3.5% 할인 |
+ * 국내 가맹점 0.7% 할인"에서 국내 0.7%가 조용히 유실되는 것을 실제 CSV로 확인했다
+ * (다중 혜택률 혼재 조사 보고서 참고). 포인트/마일리지 쪽(`detectUnitBasedPointsOrMiles`)에
+ * 이미 적용한 것과 같은 원리 — 서로 다른 값이 2개 이상이면 `MULTIPLE_CONFLICTING_VALUES`로
+ * 안전하게 남긴다 — 를 won 퍼센트 경로에도 적용한 것이다.
+ */
+describe("normalizeCard() — 국내/해외 서로 다른 혜택률 혼재 방지 (won 퍼센트 경로)", () => {
+  it("card_ad_id=10707 실제 원문 — 해외 3.5%와 국내 0.7%가 섞여 있으면 reward는 unverified(MULTIPLE_CONFLICTING_VALUES)", () => {
+    const piece = normalizeSingleSpendingPiece(
+      buildRawBenefit({
+        benefitSummary: "해외 가맹점 3.5% 할인 | 국내 가맹점 0.7% 할인",
+        descriptionLines: [
+          "전월 이용금액에 관계없이, 할인한도 없이 해외 가맹점 3.5% 결제일할인",
+          "* 해외겸용카드에 한해 제공",
+          "전월 이용금액에 관계없이, 할인한도 없이 국내 가맹점 0.7% 결제일할인",
+        ],
+      }),
+    );
+    const reward = piece.kind === "spendingBenefit" ? piece.reward : null;
+    assert.equal(reward?.status, "unverified");
+    assert.equal(reward?.status === "unverified" ? reward.reasonCode : null, "MULTIPLE_CONFLICTING_VALUES");
+  });
+
+  it("국내/해외 요율이 동일(0.7%/0.7%)하면 정보 손실이 없으므로 그대로 parsed 유지(card_ad_id=10304류 보호)", () => {
+    const piece = normalizeSingleSpendingPiece(
+      buildRawBenefit({
+        benefitCategory: "의료",
+        benefitSummary: "국내 모든 가맹점 0.7%, 해외 모든 가맹점 0.7% 캐시백",
+        descriptionLines: ["국내 모든 가맹점 0.7%, 해외 모든 이용금액 0.7% 캐시백 지급"],
+      }),
+    );
+    const reward = piece.kind === "spendingBenefit" ? piece.reward : null;
+    assert.equal(reward?.status, "parsed");
+    if (reward?.status !== "parsed" || reward.value.kind !== "rate") throw new Error("unreachable");
+    assert.deepEqual(reward.value.currency.status === "parsed" ? reward.value.currency.value : null, {
+      type: "won",
+      form: "cashback",
+    });
+    assert.equal(reward.value.rateBps.status === "parsed" ? reward.value.rateBps.value : null, 70);
+  });
+
+  it("해외만 단독 언급(국내 없음)이면 기존처럼 그대로 parsed — 회귀 없음", () => {
+    const piece = normalizeSingleSpendingPiece(
+      buildRawBenefit({
+        benefitSummary: "해외 3% 할인",
+        descriptionLines: ["해외 가맹점 3% 할인"],
+      }),
+    );
+    const reward = piece.kind === "spendingBenefit" ? piece.reward : null;
+    assert.equal(reward?.status, "parsed");
+    if (reward?.status !== "parsed" || reward.value.kind !== "rate") throw new Error("unreachable");
+    assert.equal(reward.value.rateBps.status === "parsed" ? reward.value.rateBps.value : null, 300);
+  });
+
+  it("국내가 언급돼도 '해외'가 수수료 clause에만 있고 실질적으로 유효한 rate가 1개뿐이면 parsed 유지(과차단 방지)", () => {
+    const piece = normalizeSingleSpendingPiece(
+      buildRawBenefit({
+        benefitSummary: "국내 가맹점 1% 할인 | 해외 이용 수수료 100% 청구 할인",
+        descriptionLines: ["국내 가맹점 1% 할인", "해외 이용 수수료 100% 청구 할인(수수료 면제가 아닙니다)"],
+      }),
+    );
+    const reward = piece.kind === "spendingBenefit" ? piece.reward : null;
+    assert.equal(reward?.status, "parsed");
+    if (reward?.status !== "parsed" || reward.value.kind !== "rate") throw new Error("unreachable");
+    assert.equal(reward.value.rateBps.status === "parsed" ? reward.value.rateBps.value : null, 100);
+  });
+
+  it("card_ad_id=10678 실제 원문 — 해외 2%/국내 0.7%와 별개로 수수료 100%가 두 번 더 있어도 정확히 2개 값만 충돌로 본다", () => {
+    const piece = normalizeSingleSpendingPiece(
+      buildRawBenefit({
+        benefitSummary:
+          "해외 가맹점 2% 청구 할인 | 국내 가맹점 0.7% 청구 할인 | 국제브랜드 수수료 100% 청구 할인 | 해외서비스 수수료 100% 청구 할인",
+        descriptionLines: ["해외 가맹점 2% 청구 할인", "국내 가맹점 0.7% 청구 할인"],
+      }),
+    );
+    const reward = piece.kind === "spendingBenefit" ? piece.reward : null;
+    assert.equal(reward?.status, "unverified");
+    assert.equal(reward?.status === "unverified" ? reward.reasonCode : null, "MULTIPLE_CONFLICTING_VALUES");
+  });
+
+  it("회귀 방지 — card_ad_id=10151(신한카드 플리) Case B-2의 target 판정은 이 변경으로 바뀌지 않는다", () => {
+    // 이 fixture의 summary(최대 6천원 할인 쿠폰 제공)에는 '%'도 '해외'도 없어 새 가드가
+    // 전혀 개입하지 않는다 — target만 보는 기존 테스트이므로 reward는 검증하지 않는다.
+    const piece = normalizeSingleSpendingPiece(
+      buildRawBenefit({
+        benefitCategory: "바우처",
+        benefitSummary: "최대 6천원 할인 쿠폰 제공",
+        descriptionLines: ["할인 쿠폰 적용 가맹점은 국내 모든 가맹점에서 이용한 거래에 자동 적용되며 3천원 할인"],
+      }),
+    );
+    const target = piece.kind === "spendingBenefit" ? piece.target : null;
+    assert.equal(target?.status, "parsed");
+    assert.deepEqual(target?.status === "parsed" ? target.value : null, {
+      type: "allExcept",
+      categories: ["overseas"],
+    });
+  });
+});
