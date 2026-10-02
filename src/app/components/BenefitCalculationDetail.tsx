@@ -8,6 +8,7 @@ import type {
 } from "../../lib/recommendation/types";
 import { CATEGORY_LABELS, CAUTION_WARNING_CODES, type BenefitDisplayInfo, type TierDisplayInfo } from "./SpendingForm";
 import { formatWon } from "./RecommendationCard";
+import { deriveBenefitState } from "./benefitState";
 
 interface BenefitCalculationDetailProps {
   readonly result: CardValueResult;
@@ -154,6 +155,14 @@ function describeCautionWarning(): string {
   return "일부 카드 혜택 조건은 추가 확인이 필요합니다. 최종 이용 전 카드사 홈페이지에서 조건을 확인해주세요.";
 }
 
+function describeUnverifiedBenefitState(): string {
+  return "이 카드의 혜택 정보는 있지만 조건을 확인하지 못해 계산에 반영하지 않았습니다. 실제 혜택은 표시된 혜택 금액과 다를 수 있으니, 최종 이용 전 카드사 홈페이지에서 확인해주세요.";
+}
+
+function describeUnknownBenefitState(): string {
+  return "이 카드의 혜택 정보를 확인할 수 없어 계산에 반영하지 못했습니다. 혜택이 없다는 뜻은 아닙니다.";
+}
+
 function describeFeeNoteWarning(): string {
   return "이 카드는 첫 해 연회비가 면제될 수 있어요. 위 금액은 연회비가 매년 전액 부과된다고 가정한 반복 기준이라, 첫 해 실제 순혜택은 이보다 클 수 있습니다.";
 }
@@ -173,7 +182,13 @@ export default function BenefitCalculationDetail({ result, benefitInfo, tierInfo
 
   const achievedTier = result.achievedTierId ? tierInfo[result.achievedTierId] : null;
 
-  const hasCaution = result.warnings.some((warning) => CAUTION_WARNING_CODES.has(warning.code));
+  const benefitState = deriveBenefitState(result);
+  // 일반 caution 박스는 `applied`/`not_applied`에서만 보여준다. `unverified`는 위 "혜택 계산"
+  // 영역의 전용 안내가 같은 내용을 이미 말하고(중복 방지), `unknown`은 어떤 caution warning이
+  // 생겨도 전용 안내만 보여준다.
+  const hasCaution =
+    (benefitState === "applied" || benefitState === "not_applied") &&
+    result.warnings.some((warning) => CAUTION_WARNING_CODES.has(warning.code));
   const hasFeeNote = result.warnings.some((warning) => warning.code === "FIRST_YEAR_FEE_WAIVED");
   const hasAssumedPerformance = result.warnings.some(
     (warning) => warning.code === "PREVIOUS_MONTH_PERFORMANCE_ASSUMED",
@@ -206,7 +221,15 @@ export default function BenefitCalculationDetail({ result, benefitInfo, tierInfo
 
       <section>
         <h3 className="text-sm font-semibold text-gray-900">혜택 계산</h3>
-        {applied.length === 0 ? (
+        {benefitState === "unverified" ? (
+          <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700">
+            {describeUnverifiedBenefitState()}
+          </p>
+        ) : benefitState === "unknown" ? (
+          <p className="mt-2 rounded-lg bg-gray-100 px-3 py-2 text-xs font-medium text-gray-600">
+            {describeUnknownBenefitState()}
+          </p>
+        ) : applied.length === 0 ? (
           <p className="mt-2 text-sm text-gray-500">이번 달 소비 입력으로 적용된 혜택이 없습니다.</p>
         ) : (
           <div className="mt-2 space-y-3">

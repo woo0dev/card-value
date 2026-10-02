@@ -1,6 +1,7 @@
 import type { CardValueResult } from "../../lib/recommendation/types";
 import { CAUTION_WARNING_CODES, type BenefitDisplayInfo, type TierDisplayInfo } from "./SpendingForm";
 import BenefitCalculationDetail from "./BenefitCalculationDetail";
+import { deriveBenefitState } from "./benefitState";
 
 interface RecommendationCardProps {
   readonly rank: number;
@@ -29,6 +30,8 @@ export function formatWon(amount: number): string {
  * warning이 하나라도 있으면이 아니라 `CAUTION_WARNING_CODES`(실제 확인이 필요한 warning만)에
  * 해당하는 것이 있을 때만 뜬다 — `FIRST_YEAR_FEE_WAIVED`나 `PREVIOUS_MONTH_PERFORMANCE_ASSUMED`
  * 처럼 단순 안내/계산 가정 warning으로는 뜨지 않는다(`BenefitCalculationDetail.tsx` 참고).
+ * 계산된 혜택이 하나도 없는 카드(`benefitState.ts`의 `unverified`/`unknown`)는 일반 배지 대신
+ * 상태에 맞는 배지를 보여준다 — 혜택이 없다고 단정하지 않는다.
  */
 export default function RecommendationCard({
   rank,
@@ -39,6 +42,7 @@ export default function RecommendationCard({
   expanded,
   onToggleExpanded,
 }: RecommendationCardProps) {
+  const benefitState = deriveBenefitState(result);
   const hasWarnings = result.warnings.some((warning) => CAUTION_WARNING_CODES.has(warning.code));
 
   return (
@@ -73,10 +77,20 @@ export default function RecommendationCard({
         </div>
       </dl>
 
-      {hasWarnings && (
+      {benefitState === "unverified" ? (
         <p className="mt-4 rounded-lg bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700">
-          일부 조건 확인 필요
+          혜택 정보 확인 필요
         </p>
+      ) : benefitState === "unknown" ? (
+        <p className="mt-4 rounded-lg bg-gray-100 px-3 py-2 text-xs font-medium text-gray-600">
+          혜택 정보 확인 불가
+        </p>
+      ) : (
+        hasWarnings && (
+          <p className="mt-4 rounded-lg bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700">
+            일부 조건 확인 필요
+          </p>
+        )
       )}
 
       <button
